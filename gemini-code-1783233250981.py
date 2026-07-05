@@ -130,7 +130,7 @@ def search_edinet_api(company_name):
     return edinet_result
 
 # ==========================================
-# 【提案D】 有価証券報告書の自動読み込みとテキスト抽出 (RAG)
+# 【提案D】 有価証券報告書の自動読み込みとテキスト抽出 (キーワード抽出型スマートRAG)
 # ==========================================
 def extract_text_from_edinet_pdf(pdf_url):
     try:
@@ -138,15 +138,30 @@ def extract_text_from_edinet_pdf(pdf_url):
         if response.status_code == 200:
             pdf_file = response.content
             doc = fitz.open(stream=pdf_file, filetype="pdf")
-            extracted_text = ""
-            # 【修正】ページ制限を30ページから500ページに拡張（財務諸表の注記まで届かせるため）
-            num_pages = min(500, doc.page_count)
+            
+            relevant_text = ""
+            fallback_text = ""
+            # 【重要】AIに渡す前に、Python側で探す絶対に見落とせないキーワード
+            risk_keywords = ["事業等のリスク", "訴訟", "継続企業", "疑義", "ゴーイング", "不確実性"]
+            
+            num_pages = min(150, doc.page_count) # 150ページまで探索
             for i in range(num_pages):
-                page = doc.load_page(i)
-                extracted_text += page.get_text() + "\n"
+                page_text = doc.load_page(i).get_text()
+                
+                # 最初の10ページは、キーワードが見つからなかった時の保険として保存
+                if i < 10:
+                    fallback_text += page_text + "\n"
+                    
+                # ページ内に1つでもキーワードが含まれていれば、そのページを丸ごと抽出
+                if any(keyword in page_text for keyword in risk_keywords):
+                    relevant_text += f"\n--- {i+1}ページ目 ---\n{page_text}"
+                    
             doc.close()
-            # 【修正】AIに渡す文字数の上限を10万文字から30万文字に拡張
-            return extracted_text[:300000]
+            
+            # リスク関連ページが見つかったらそれを、無ければ保険テキストを返す
+            final_text = relevant_text if relevant_text.strip() else fallback_text
+            return final_text[:100000]
+            
     except Exception as e:
         return f"PDF読み込みエラー: {str(e)}"
     return ""
@@ -220,7 +235,7 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     【EDINET API結果】
     {json.dumps(edinet_results, ensure_ascii=False)}
 
-    【有報PDF抽出テキスト（最大30ページ分）】
+    【有報PDF抽出テキスト（最大200ページ分）】
     {pdf_text}
 
     【Web検索結果】
