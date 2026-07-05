@@ -340,8 +340,11 @@ if submit_button and input_name:
         nta_data = search_nta_api(input_name, input_region)
         search_data = search_web_info(localized_query)
         
-    with st.spinner("STEP 3: EDINET API照会と、関連する全PDFの自動読み込み(RAG)を実行中..."):
+    with st.spinner("STEP 3: 日米の公式開示API（EDINET / SEC EDGAR）から財務書類を自動照会中..."):
         edinet_data = search_edinet_api(input_name)
+        # 【海外強化】SEC EDGAR APIを同時に実行
+        sec_data = search_sec_edgar_api(input_name)
+        
         pdf_extracted_text = ""
         
         if edinet_data["company_found_in_api"] and len(edinet_data["documents"]) > 0:
@@ -364,7 +367,7 @@ if submit_button and input_name:
 
     with st.spinner("STEP 4: Gemini 2.5 による全データの統合分析・リスク判定中..."):
         try:
-            report_data = analyze_with_gemini(input_name, input_country, input_region, search_data, edinet_data, nta_data, sanction_data, pdf_extracted_text)
+            report_data = analyze_with_gemini(input_name, input_country, input_region, search_data, edinet_data, nta_data, sanction_data, pdf_extracted_text, sec_data)
             st.success("ディープスクリーニングが完了しました。")
             st.markdown("---")
             
