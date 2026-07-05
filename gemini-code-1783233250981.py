@@ -18,7 +18,7 @@ NTA_API_ID = st.secrets.get("NTA_API_ID", "")
 
 genai.configure(api_key=GEMINI_API_KEY)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-MODEL_NAME = 'gemini-3.5-pro'
+MODEL_NAME = 'gemini-2.5-pro'
 
 # ==========================================
 # 【提案B】 多言語クエリの自動生成 (Pre-Search AI)
