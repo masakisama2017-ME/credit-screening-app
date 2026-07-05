@@ -76,7 +76,7 @@ def search_edinet_api(company_name):
                         edinet_result["company_found_in_api"] = True
                         edinet_result["document_title"] = doc.get("docDescription", "書類名不明")
                         edinet_result["filing_date"] = target_date
-                        edinet_result["direct_pdf_url"] = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}?type=2"
+                        edinet_result["direct_pdf_url"] = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}?type=2&Subscription-Key={EDINET_API_KEY}"
                         edinet_result["message"] = f"{target_date} 提出の書類を発見しました。"
                         
                         return edinet_result 
