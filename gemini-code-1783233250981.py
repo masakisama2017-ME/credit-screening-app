@@ -5,7 +5,7 @@ from tavily import TavilyClient
 import requests
 from datetime import datetime, timedelta
 import urllib.parse
-import fitz
+import fitz  # PyMuPDF
 import io
 
 # ==========================================
@@ -24,26 +24,22 @@ MODEL_NAME = 'gemini-2.5-flash'
 # 【提案B】 多言語クエリの自動生成 (Pre-Search AI)
 # ==========================================
 def generate_localized_query(company_name, country, region):
-    """指定された国の公用語に合わせて、ネガティブ検索クエリを最適化する"""
     model = genai.GenerativeModel(MODEL_NAME)
     prompt = f"""
-    対象国「{country}」の最も一般的なビジネス言語（例: 米国なら英語、中国なら中国語、日本なら日本語）を特定し、
-    企業名「{company_name}」に対する以下のネガティブ検索用クエリ（検索窓に入力する文字列）を作成してください。
+    対象国「{country}」の最も一般的なビジネス言語を特定し、
+    企業名「{company_name}」に対する以下のネガティブ検索用クエリを作成してください。
     【必須キーワードの意味】倒産, 訴訟, 詐欺, 行政処分, 不祥事
     
-    出力は絶対に、検索クエリの「文字列のみ」としてください（例: "CompanyName" AND ("bankruptcy" OR "lawsuit" OR "fraud") ）。
+    出力は絶対に、検索クエリの「文字列のみ」としてください。
     """
     response = model.generate_content(prompt)
     localized_query = response.text.strip()
-    
-    final_query = f"{localized_query} 「公式サイト」 「D-U-N-S」 「企業コード」"
-    return final_query
+    return f"{localized_query} 「公式サイト」 「D-U-N-S」 「企業コード」"
 
 # ==========================================
 # 【提案C】 グローバル制裁リスト照会 (OpenSanctions API)
 # ==========================================
 def check_global_sanctions(company_name):
-    """OpenSanctions APIを利用して、OFAC等の国際的な制裁リストを照会する"""
     sanction_result = {"status": "クリーン（該当なし）", "details": []}
     encoded_name = urllib.parse.quote(company_name)
     url = f"https://api.opensanctions.org/search/default?q={encoded_name}"
@@ -63,7 +59,6 @@ def check_global_sanctions(company_name):
                     })
     except Exception as e:
         sanction_result["status"] = f"照会エラー: {str(e)}"
-        
     return sanction_result
 
 # ==========================================
@@ -96,7 +91,7 @@ def search_nta_api(company_name, region):
     return nta_result
 
 # ==========================================
-# 1-B. 情報収集機能 (Web検索 - 多言語対応版)
+# 1-B. 情報収集機能 (Web検索)
 # ==========================================
 def search_web_info(localized_query):
     response = tavily_client.search(
@@ -138,21 +133,16 @@ def search_edinet_api(company_name):
 # 【提案D】 有価証券報告書の自動読み込みとテキスト抽出 (RAG)
 # ==========================================
 def extract_text_from_edinet_pdf(pdf_url):
-    """PDFをダウンロードし、テキストを抽出する"""
     try:
         response = requests.get(pdf_url, stream=True, timeout=15)
         if response.status_code == 200:
-            # メモリ上にPDFを展開し、PyMuPDF(fitz)で読み込む
             pdf_file = response.content
             doc = fitz.open(stream=pdf_file, filetype="pdf")
-            
             extracted_text = ""
-            # 処理時間を考慮し、最初の30ページを抽出
             num_pages = min(30, doc.page_count)
             for i in range(num_pages):
                 page = doc.load_page(i)
                 extracted_text += page.get_text() + "\n"
-                
             doc.close()
             return extracted_text[:100000]
     except Exception as e:
@@ -160,12 +150,11 @@ def extract_text_from_edinet_pdf(pdf_url):
     return ""
 
 # ==========================================
-# 2. AIモデル (Gemini 2.5による全統合・厳格判定)
+# 2. AIモデル (Geminiによる全統合・厳格判定)
 # ==========================================
 def analyze_with_gemini(company_name, country, region, search_results, edinet_results, nta_results, sanction_results, pdf_text):
     model = genai.GenerativeModel(MODEL_NAME)
     
-    # 【完全復元】お客様指定の日本語100個・英語100個のネガティブキーワード全量辞書
     negative_dictionary = """
     【日本語キーワード】
     「倒産・経営破綻」: 倒産, 破産, 民事再生, 会社更生, 特別清算, 経営破綻, 経営難, 事業停止, 廃業, 夜逃げ
@@ -280,7 +269,7 @@ if submit_button and input_name:
             
             col1, col2 = st.columns([1, 1])
             
-with col1:
+            with col1:
                 st.subheader("＜法人基本情報＞")
                 corp_info = report_data.get("corporate_info", {})
                 if corp_info.get("corporate_number"):
