@@ -187,64 +187,66 @@ def search_sec_edgar_api(company_name):
     return sec_result
     
 # ==========================================
-# 1-E. 【追加】グローバル財務PDF探索機能 (海外企業汎用)
+# 1-E. グローバル財務PDF探索機能 (海外企業汎用)
 # ==========================================
 def search_global_financial_pdfs(company_name, country):
     """Web検索を通じて海外企業の公式IR資料（Annual Report等のPDF）を直接探し出す"""
-    query = f"{company_name} {country} investor relations annual report financial statements pdf"
+    # 【改善1】filetype:pdf を明示的に指定し、統合報告書（Integrated Report）も対象に含める
+    query = f"{company_name} {country} (Annual Report OR Integrated Report) filetype:pdf"
     try:
         response = tavily_client.search(
             query=query,
             search_depth="advanced", 
-            max_results=8, 
-            include_raw_content=False # URLだけ欲しいので本文は不要
+            max_results=10, 
+            include_raw_content=False 
         )
-        # 検索結果から .pdf で終わるURLだけを抽出
-        pdf_urls = [res['url'] for res in response.get('results', []) if res['url'].lower().endswith('.pdf')]
+        # 【改善2】endswith('.pdf') ではなく、URL内に '.pdf' が含まれるかで判定（パラメータ対策）
+        pdf_urls = [res['url'] for res in response.get('results', []) if '.pdf' in res['url'].lower()]
         return pdf_urls
     except Exception as e:
         return []
         
 # ==========================================
-# 【提案D】 有価証券報告書の自動読み込みとテキスト抽出 (スマートRAG v2: ページ先読み型)
+# 【提案D】 有価証券報告書等の自動読み込みとテキスト抽出
 # ==========================================
 def extract_text_from_edinet_pdf(pdf_url):
     try:
-        response = requests.get(pdf_url, stream=True, timeout=15)
+        # 【改善3】海外企業サイトのBot弾き（403エラー）を回避するためのChromeブラウザ偽装ヘッダー
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        # headersを付与してリクエストを送信
+        response = requests.get(pdf_url, headers=headers, stream=True, timeout=15)
+        
         if response.status_code == 200:
             pdf_file = response.content
             doc = fitz.open(stream=pdf_file, filetype="pdf")
             
             relevant_text = ""
             fallback_text = ""
-            risk_keywords = ["事業等のリスク", "訴訟", "継続企業", "疑義", "ゴーイングコンサーン", "不確実性", 
-                "債務超過", "営業損失", "赤字", "重大な損失", "行政処分", "法令違反", "不正"]
+            risk_keywords = [
+                "事業等のリスク", "訴訟", "継続企業", "疑義", "ゴーイングコンサーン", "不確実性", 
+                "債務超過", "営業損失", "赤字", "重大な損失", "行政処分", "法令違反", "不正",
+                "net loss", "going concern", "insolvency", "restructuring", "litigation", "risk factors"
+            ]
             
             num_pages = min(150, doc.page_count)
-            extracted_pages = set() # 重複を防ぐためのセット（箱）
+            extracted_pages = set()
             
             for i in range(num_pages):
                 page_text = doc.load_page(i).get_text()
-                
-                # 最初の10ページは保険として保存
                 if i < 10:
                     fallback_text += f"\n--- {i+1}ページ目 ---\n{page_text}"
-                    
-                # 【改善1】PDF特有の「空白文字」や「改行」を完全に消し去ってからキーワード照合する
-                clean_text = page_text.replace(" ", "").replace(" ", "").replace("\n", "")
-                
-                if any(keyword in clean_text for keyword in risk_keywords):
-                    # 【改善2】キーワードが見つかったら、そのページと「次の2ページ」もセットで抽出予約する
+                clean_text = page_text.lower().replace(" ", "").replace(" ", "").replace("\n", "")
+                if any(keyword.replace(" ", "") in clean_text for keyword in risk_keywords):
                     extracted_pages.update([i, i+1, i+2])
                     
-            # 予約されたページを順番にテキスト化して結合する
             for i in sorted(list(extracted_pages)):
                 if i < doc.page_count:
                     relevant_text += f"\n--- {i+1}ページ目 ---\n{doc.load_page(i).get_text()}"
                     
             doc.close()
             final_text = relevant_text if relevant_text.strip() else fallback_text
-            # AIに渡す情報量を最大20万文字に拡張
             return final_text[:200000]
             
     except Exception as e:
