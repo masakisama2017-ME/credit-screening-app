@@ -139,12 +139,14 @@ def extract_text_from_edinet_pdf(pdf_url):
             pdf_file = response.content
             doc = fitz.open(stream=pdf_file, filetype="pdf")
             extracted_text = ""
-            num_pages = min(30, doc.page_count)
+            # 【修正】ページ制限を30ページから500ページに拡張（財務諸表の注記まで届かせるため）
+            num_pages = min(500, doc.page_count)
             for i in range(num_pages):
                 page = doc.load_page(i)
                 extracted_text += page.get_text() + "\n"
             doc.close()
-            return extracted_text[:100000]
+            # 【修正】AIに渡す文字数の上限を10万文字から30万文字に拡張
+            return extracted_text[:300000]
     except Exception as e:
         return f"PDF読み込みエラー: {str(e)}"
     return ""
