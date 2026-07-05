@@ -185,7 +185,26 @@ def search_sec_edgar_api(company_name):
         sec_result["message"] = f"SEC API照会エラー: {str(e)}"
         
     return sec_result
-
+    
+# ==========================================
+# 1-E. 【追加】グローバル財務PDF探索機能 (海外企業汎用)
+# ==========================================
+def search_global_financial_pdfs(company_name, country):
+    """Web検索を通じて海外企業の公式IR資料（Annual Report等のPDF）を直接探し出す"""
+    query = f"{company_name} {country} investor relations annual report financial statements pdf"
+    try:
+        response = tavily_client.search(
+            query=query,
+            search_depth="advanced", 
+            max_results=8, 
+            include_raw_content=False # URLだけ欲しいので本文は不要
+        )
+        # 検索結果から .pdf で終わるURLだけを抽出
+        pdf_urls = [res['url'] for res in response.get('results', []) if res['url'].lower().endswith('.pdf')]
+        return pdf_urls
+    except Exception as e:
+        return []
+        
 # ==========================================
 # 【提案D】 有価証券報告書の自動読み込みとテキスト抽出 (スマートRAG v2: ページ先読み型)
 # ==========================================
@@ -273,7 +292,7 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     1. 推測は一切禁止。明確な情報とURLが存在する場合のみ「有り」とすること。
     2. 【制裁リストAPI結果】の内容を必ず JSON の sanction_info に反映させること。
     3. ネガティブ情報については、【ネガティブキーワード辞書】に記載された日本語・英語のワードが検索結果内の対象企業の文脈で1つでも使用されている場合、「該当有り」とすること。
-    4. 【有報PDF抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する重要な疑義（ゴーイング・コンサーン）」「重大な赤字や債務超過」に関する具体的な記述を探し出し、要約して edinet_risk_summary に記載すること。該当記述がなければ「特筆すべきリスク記載なし」とすること。文字数の制限はないので、見つけたリスクは詳細かつ具体的に記載すること。
+    4. 【公式開示書類・外部IR資料抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する重要な疑義」「重大な赤字や債務超過」に関する具体的な記述を探し出し、要約して edinet_risk_summary に記載すること。該当記述がなければ「特筆すべきリスク記載なし」とすること。文字数の制限はないので、複数の書類の情報を見つけた場合は詳細かつ具体的に記載すること。
 
     【出力JSONスキーマ】
     {{
@@ -304,7 +323,7 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     【EDINET API結果】
     {json.dumps(edinet_results, ensure_ascii=False)}
 
-    【有報PDF抽出テキスト（最大200ページ分）】
+    【公式開示書類・外部IR資料抽出テキスト（最大300ページ分）】
     {pdf_text}
 
     【Web検索結果（記事本文含む）】
@@ -340,30 +359,34 @@ if submit_button and input_name:
         nta_data = search_nta_api(input_name, input_region)
         search_data = search_web_info(localized_query)
         
-    with st.spinner("STEP 3: 日米の公式開示API（EDINET / SEC EDGAR）から財務書類を自動照会中..."):
+    with st.spinner("STEP 3: 公式開示API（EDINET/SEC）およびグローバルWebからの財務PDF探索を実行中..."):
         edinet_data = search_edinet_api(input_name)
-        # 【海外強化】SEC EDGAR APIを同時に実行
         sec_data = search_sec_edgar_api(input_name)
         
         pdf_extracted_text = ""
         
+        # 1. 日本企業向け処理（EDINETからPDFを抽出）
         if edinet_data["company_found_in_api"] and len(edinet_data["documents"]) > 0:
-            # 【修正】見つかった書類を最大20件まで全て読み込むループ処理
             for idx, doc in enumerate(edinet_data["documents"]):
-                if idx >= 20:  # 処理時間とメモリの観点から直近20件を上限とする
-                    break
-                    
+                if idx >= 5: break
                 title = doc.get("title", "")
                 target_pdf_url = doc.get("direct_pdf_url")
+                if "確認書" in title or "内部統制" in title or "自己株" in title: continue
                 
-                # リスク情報がほぼ含まれない事務的な書類はスキップ（処理高速化のため）
-                if "確認書" in title or "内部統制" in title or "自己株" in title:
-                    continue
-                    
                 extracted_text = extract_text_from_edinet_pdf(target_pdf_url)
                 if extracted_text:
-                    # AIが「どの書類に書かれていたか」を区別できるように見出しをつけて結合する
-                    pdf_extracted_text += f"\n\n======================\n【読み込み元書類: {title}】\n======================\n{extracted_text}"
+                    pdf_extracted_text += f"\n\n======================\n【EDINET書類: {title}】\n======================\n{extracted_text}"
+        
+        # 2. 【追加】海外企業向け処理（EDINETで見つからなかった場合、WebからPDFリンクを探して解析）
+        if not edinet_data["company_found_in_api"]:
+            global_pdf_urls = search_global_financial_pdfs(input_name, input_country)
+            
+            # 発見した海外企業のIR資料（PDF）を最大2件まで読み込む
+            for pdf_url in global_pdf_urls[:2]:
+                extracted_text = extract_text_from_edinet_pdf(pdf_url)
+                # エラーではない有効なテキストが抽出できた場合のみ追加
+                if extracted_text and "PDF読み込みエラー" not in extracted_text:
+                    pdf_extracted_text += f"\n\n======================\n【外部IR資料 (Web抽出): {pdf_url}】\n======================\n{extracted_text}"
 
     with st.spinner("STEP 4: Gemini 2.5 による全データの統合分析・リスク判定中..."):
         try:
