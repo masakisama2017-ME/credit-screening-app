@@ -2,4 +2,4 @@ streamlit
 google-generativeai
 tavily-python
 requests
-PyPDF2
+PyMuPDF
