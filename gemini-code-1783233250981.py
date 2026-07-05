@@ -191,17 +191,20 @@ def search_sec_edgar_api(company_name):
 # ==========================================
 def search_global_financial_pdfs(company_name, country):
     """Web検索を通じて海外企業の公式IR資料（Annual Report等のPDF）を直接探し出す"""
-    # 【改善1】filetype:pdf を明示的に指定し、統合報告書（Integrated Report）も対象に含める
-    query = f"{company_name} {country} (Annual Report OR Integrated Report) filetype:pdf"
+    # 【改善1】自動で現在と昨年の年号を取得し、最新のレポートだけを狙い撃ちする
+    current_year = datetime.now().year
+    last_year = current_year - 1
+    
+    query = f"{company_name} {country} (Annual Report OR Financial Report) ({current_year} OR {last_year}) filetype:pdf"
     try:
         response = tavily_client.search(
             query=query,
             search_depth="advanced", 
-            max_results=10, 
+            max_results=5, 
             include_raw_content=False 
         )
-        # 【改善2】endswith('.pdf') ではなく、URL内に '.pdf' が含まれるかで判定（パラメータ対策）
-        pdf_urls = [res['url'] for res in response.get('results', []) if '.pdf' in res['url'].lower()]
+        # 【改善2】URLに.pdfが含まれていなくても、検索エンジンがPDFと判定したURLをすべて信じてリスト化する
+        pdf_urls = [res['url'] for res in response.get('results', [])]
         return pdf_urls
     except Exception as e:
         return []
@@ -211,14 +214,22 @@ def search_global_financial_pdfs(company_name, country):
 # ==========================================
 def extract_text_from_edinet_pdf(pdf_url):
     try:
-        # 【改善3】海外企業サイトのBot弾き（403エラー）を回避するためのChromeブラウザ偽装ヘッダー
+        # 【改善3】欧州企業の極めて厳しいファイアウォールを突破するための完全な偽装ヘッダー
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "keep-alive"
         }
-        # headersを付与してリクエストを送信
+        
         response = requests.get(pdf_url, headers=headers, stream=True, timeout=15)
         
         if response.status_code == 200:
+            # 【改善4】ダウンロードしたデータが本当にPDFかを確認（HTMLページならスキップしてエラーを防ぐ）
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'pdf' not in content_type and not pdf_url.lower().endswith('.pdf'):
+                return ""
+                
             pdf_file = response.content
             doc = fitz.open(stream=pdf_file, filetype="pdf")
             
