@@ -280,7 +280,7 @@ if submit_button and input_name:
             
             col1, col2 = st.columns([1, 1])
             
-            with col1:
+with col1:
                 st.subheader("＜法人基本情報＞")
                 corp_info = report_data.get("corporate_info", {})
                 if corp_info.get("corporate_number"):
@@ -291,13 +291,36 @@ if submit_button and input_name:
                     st.write("※取得できませんでした。")
 
                 st.subheader("＜企業コード＞")
-                st.write(f"**帝国DB:** {report_data.get('tdb_code', {}).get('status')}")
-                st.write(f"**TSR:** {report_data.get('tsr_code', {}).get('status')}")
-                st.write(f"**D-U-N-S:** {report_data.get('duns_number', {}).get('status')}")
+                tdb = report_data.get("tdb_code", {})
+                if tdb.get("status") == "有り":
+                    st.markdown(f"**帝国DB:** 有り 🔗 [{tdb.get('url')}]({tdb.get('url')})")
+                else:
+                    st.write("**帝国DB:** なし")
+                    
+                tsr = report_data.get("tsr_code", {})
+                if tsr.get("status") == "有り":
+                    st.markdown(f"**TSR:** 有り 🔗 [{tsr.get('url')}]({tsr.get('url')})")
+                else:
+                    st.write("**TSR:** なし")
+                    
+                duns = report_data.get("duns_number", {})
+                if duns.get("status") == "有り":
+                    st.markdown(f"**D-U-N-S:** 有り 🔗 [{duns.get('url')}]({duns.get('url')})")
+                else:
+                    st.write("**D-U-N-S:** なし")
 
                 st.subheader("＜公式サイト / 官報＞")
-                st.write(f"**公式サイト:** {report_data.get('official_website', {}).get('status')}")
-                st.write(f"**官報:** {report_data.get('official_gazette', {}).get('status')}")
+                ow = report_data.get("official_website", {})
+                if ow.get("status") == "有り":
+                    st.markdown(f"**公式サイト:** 有り 🔗 [{ow.get('url')}]({ow.get('url')})")
+                else:
+                    st.write("**公式サイト:** なし")
+                    
+                og = report_data.get("official_gazette", {})
+                if og.get("status") == "有り":
+                    st.markdown(f"**官報:** 有り 🔗 [{og.get('url')}]({og.get('url')})")
+                else:
+                    st.write("**官報:** なし")
 
             with col2:
                 st.subheader("🌍 ＜グローバル制裁・ウォッチリスト＞")
