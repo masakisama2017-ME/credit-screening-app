@@ -18,7 +18,7 @@ NTA_API_ID = st.secrets.get("NTA_API_ID", "")
 
 genai.configure(api_key=GEMINI_API_KEY)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-MODEL_NAME = 'gemini-2.5-pro'
+MODEL_NAME = 'gemini-3.5-pro'
 
 # ==========================================
 # 【提案B】 多言語クエリの自動生成 (Pre-Search AI)
@@ -281,12 +281,27 @@ if submit_button and input_name:
         nta_data = search_nta_api(input_name, input_region)
         search_data = search_web_info(localized_query)
         
-    with st.spinner("STEP 3: EDINET API過去100日分の照会と、有報PDFの自動読み込み(RAG)を実行中..."):
+    with st.spinner("STEP 3: EDINET API照会と、関連する全PDFの自動読み込み(RAG)を実行中..."):
         edinet_data = search_edinet_api(input_name)
         pdf_extracted_text = ""
+        
         if edinet_data["company_found_in_api"] and len(edinet_data["documents"]) > 0:
-            first_pdf_url = edinet_data["documents"][0]["direct_pdf_url"]
-            pdf_extracted_text = extract_text_from_edinet_pdf(first_pdf_url)
+            # 【修正】見つかった書類を最大20件まで全て読み込むループ処理
+            for idx, doc in enumerate(edinet_data["documents"]):
+                if idx >= 20:  # 処理時間とメモリの観点から直近20件を上限とする
+                    break
+                    
+                title = doc.get("title", "")
+                target_pdf_url = doc.get("direct_pdf_url")
+                
+                # リスク情報がほぼ含まれない事務的な書類はスキップ（処理高速化のため）
+                if "確認書" in title or "内部統制" in title or "自己株" in title:
+                    continue
+                    
+                extracted_text = extract_text_from_edinet_pdf(target_pdf_url)
+                if extracted_text:
+                    # AIが「どの書類に書かれていたか」を区別できるように見出しをつけて結合する
+                    pdf_extracted_text += f"\n\n======================\n【読み込み元書類: {title}】\n======================\n{extracted_text}"
 
     with st.spinner("STEP 4: Gemini 2.5 による全データの統合分析・リスク判定中..."):
         try:
