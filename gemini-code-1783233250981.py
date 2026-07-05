@@ -5,7 +5,7 @@ from tavily import TavilyClient
 import requests
 from datetime import datetime, timedelta
 import urllib.parse
-import PyPDF2
+import fitz
 import io
 
 # ==========================================
@@ -138,15 +138,22 @@ def search_edinet_api(company_name):
 # 【提案D】 有価証券報告書の自動読み込みとテキスト抽出 (RAG)
 # ==========================================
 def extract_text_from_edinet_pdf(pdf_url):
+    """PDFをダウンロードし、テキストを抽出する"""
     try:
         response = requests.get(pdf_url, stream=True, timeout=15)
         if response.status_code == 200:
-            pdf_file = io.BytesIO(response.content)
-            reader = PyPDF2.PdfReader(pdf_file)
+            # メモリ上にPDFを展開し、PyMuPDF(fitz)で読み込む
+            pdf_file = response.content
+            doc = fitz.open(stream=pdf_file, filetype="pdf")
+            
             extracted_text = ""
-            num_pages = min(30, len(reader.pages))
+            # 処理時間を考慮し、最初の30ページを抽出
+            num_pages = min(30, doc.page_count)
             for i in range(num_pages):
-                extracted_text += reader.pages[i].extract_text() + "\n"
+                page = doc.load_page(i)
+                extracted_text += page.get_text() + "\n"
+                
+            doc.close()
             return extracted_text[:100000]
     except Exception as e:
         return f"PDF読み込みエラー: {str(e)}"
