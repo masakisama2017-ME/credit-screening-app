@@ -20,7 +20,6 @@ tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 # ==========================================
 def search_web_info(company_name, country, region):
     """指定された国・地域と企業名で、Web上からエビデンスを探す"""
-    # 7項目を網羅的に拾えるよう検索クエリを調整
     query = f"国:{country} 地域:{region} 企業名:{company_name} 「公式サイト」 「官報」 「帝国企業コード」 「TSR企業コード」 「DUNSナンバー」 「倒産 OR 訴訟 OR 不祥事 OR 行政処分 OR bankruptcy OR fraud」"
     
     response = tavily_client.search(
@@ -31,28 +30,21 @@ def search_web_info(company_name, country, region):
     return response
 
 # ==========================================
-# 1-B. 情報収集機能 (EDINET API連携: 過去100日分検索)
+# 1-B. 情報収集機能 (EDINET API連携: 過去100日分【すべて】検索)
 # ==========================================
 def search_edinet_api(company_name):
-    """
-    金融庁 EDINET API (v2) にアクセスし、直近の有価証券報告書・四半期報告書の有無を確認する。
-    ※四半期報告書の提出サイクルをカバーするため、過去100日間をループして探します。
-    """
+    """金融庁 EDINET API (v2) にアクセスし、直近100日以内の全書類を取得する"""
     url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
     
     edinet_result = {
         "company_found_in_api": False,
-        "document_title": "",
-        "filing_date": "",
-        "direct_pdf_url": "",
+        "documents": [],  # 複数の書類を格納するための空のリスト（箱）
         "message": "直近100日以内に提出された書類は見つかりませんでした。"
     }
 
     # 過去100日間を1日ずつ遡ってAPIに問い合わせる
     for i in range(100):
         target_date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-        
-        # ▼ ここを修正：APIキー（Subscription-Key）を通信パラメータに追加します
         params = {
             "date": target_date, 
             "type": 2,
@@ -68,23 +60,24 @@ def search_edinet_api(company_name):
                 for doc in data.get("results", []):
                     filer_name = doc.get("filerName", "")
                     
-                    # 会社名が一致するか確認
+                    # 会社名が一致した場合、リストに書類情報を追加していく（途中で終了しない）
                     if filer_name and company_name in filer_name:
                         doc_id = doc.get("docID")
-                        
-                        # 見つかった場合、結果を格納して即座に終了する
                         edinet_result["company_found_in_api"] = True
-                        edinet_result["document_title"] = doc.get("docDescription", "書類名不明")
-                        edinet_result["filing_date"] = target_date
-                        edinet_result["direct_pdf_url"] = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}?type=2&Subscription-Key={EDINET_API_KEY}"
-                        edinet_result["message"] = f"{target_date} 提出の書類を発見しました。"
                         
-                        return edinet_result 
+                        # 見つけた書類を一つずつリストに追加
+                        edinet_result["documents"].append({
+                            "title": doc.get("docDescription", "書類名不明"),
+                            "filing_date": target_date,
+                            "direct_pdf_url": f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}?type=2&Subscription-Key={EDINET_API_KEY}"
+                        })
                         
         except Exception as e:
-            # 通信エラーが起きてもプログラムを止めず、次の日の検索へ進む
-            continue 
+            continue # エラーが起きても次の日の検索へ進む
             
+    if edinet_result["company_found_in_api"]:
+        edinet_result["message"] = f"合計 {len(edinet_result['documents'])} 件の書類を発見しました。"
+        
     return edinet_result
 
 # ==========================================
@@ -94,7 +87,6 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     """検索結果とEDINET API結果をGeminiに渡し、辞書に基づく厳密なJSON出力をさせる"""
     model = genai.GenerativeModel('gemini-2.5-flash')
     
-    # ユーザー指定のネガティブキーワード辞書
     negative_dictionary = """
     【日本語キーワード】
     「倒産・経営破綻」: 倒産, 破産, 民事再生, 会社更生, 特別清算, 経営破綻, 経営難, 事業停止, 廃業, 夜逃げ
@@ -119,6 +111,7 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     「Compliance & Sanctions」: money laundering, OFAC, cartel, price fixing, insider trading, banned, blocked, embargo, KYC violation, compliance failure
     「Management Turmoil」: resignation, ousted, boardroom battle, auditor resignation, delisted, going concern, corporate governance, proxy fight, hostile takeover, shareholder revolt
     「Reputation & Controversy」: arrest, investigation, raided, subpoena, indicted, guilty, boycott, controversy, backlash, outrage
+
     """
 
     prompt = f"""
@@ -128,17 +121,19 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     【厳守する絶対ルール】
     1. 推測や想像での補完は一切禁止。検索結果内に明確な情報と「リンク(URL)」が存在する場合のみ「有り」とし、確認できない場合は必ず「なし」とすること。
     2. 同名他社の情報は絶対に除外すること。
-    3. 「帝国企業コード」「TSR企業コード」「D-U-N-S® Number」については、企業概要ページやデータベースサイト等で対象企業のコードとして明記されているURLがあれば「有り」とすること。番号自体の推測は絶対に行わないこと。
-    4. ネガティブ情報については、以下の【ネガティブキーワード辞書】に記載されたワードが検索結果内の対象企業の文脈で1つでも使用されている場合、「該当有り」とすること。
+    3. 「有価証券報告書」については、【EDINET API結果】に対象企業の書類が複数含まれている場合、そのすべての書類（提出日、書類名、URL）を reports 配列に抽出すること。
+    4. ネガティブ情報については、【ネガティブキーワード辞書】に記載されたワードが検索結果内の対象企業の文脈で1つでも使用されている場合、「該当有り」とすること。
     5. 以下のJSONスキーマに完全に従って出力すること。純粋なJSON文字列のみを出力し、マークダウンを含めないこと。
-
-    【ネガティブキーワード辞書】
-    {negative_dictionary}
 
     【出力JSONスキーマ】
     {{
       "official_website": {{ "status": "有り" または "なし", "url": "有りの場合はURL、なしは空文字" }},
-      "securities_report": {{ "status": "有り" または "なし", "url": "有りの場合はURL、なしは空文字" }},
+      "securities_report": {{
+        "status": "有り" または "なし",
+        "reports": [
+          {{ "date": "提出日", "title": "書類名", "url": "PDFのURL" }}
+        ]
+      }},
       "official_gazette": {{ "status": "有り" または "なし", "url": "有りの場合はURL、なしは空文字" }},
       "tdb_code": {{ "status": "有り" または "なし", "url": "有りの場合はURL、なしは空文字" }},
       "tsr_code": {{ "status": "有り" または "なし", "url": "有りの場合はURL、なしは空文字" }},
@@ -146,11 +141,7 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
       "negative_info": {{
         "status": "該当有り" または "なし",
         "details": [
-          {{
-            "category": "ヒットした辞書の分類名",
-            "matched_keywords": ["ワード1", "ワード2"],
-            "urls": ["URL1", "URL2"]
-          }}
+          {{ "category": "分類名", "matched_keywords": ["ワード1"], "urls": ["URL1"] }}
         ]
       }}
     }}
@@ -187,7 +178,8 @@ if submit_button:
     if not input_name:
         st.error("会社名を入力してください。")
     else:
-        with st.spinner(f"「{input_name}」に関する事実情報を検索・精査しています..."):
+        # APIが100日分検索するため、メッセージでユーザーに待ち時間を伝えます
+        with st.spinner(f"「{input_name}」に関する事実情報を検索中...（EDINET過去100日分を照会中のため最大1分程度かかります）"):
             try:
                 search_data = search_web_info(input_name, input_country, input_region)
                 edinet_data = search_edinet_api(input_name)
@@ -204,10 +196,13 @@ if submit_button:
                 else:
                     st.write("なし")
                 
-                # 2. 有価証券報告書
+                # 2. 有価証券報告書 (複数表示対応)
                 st.subheader("＜有価証券報告書＞")
-                if report_data.get("securities_report", {}).get("status") == "有り":
-                    st.markdown(f"**有り** 🔗 [{report_data['securities_report']['url']}]({report_data['securities_report']['url']})")
+                sr_info = report_data.get("securities_report", {})
+                if sr_info.get("status") == "有り" and sr_info.get("reports"):
+                    st.markdown("**有り**")
+                    for rep in sr_info.get("reports", []):
+                        st.markdown(f"- 🔗 [{rep.get('date')} 提出 : {rep.get('title')}]({rep.get('url')})")
                 else:
                     st.write("なし")
 
