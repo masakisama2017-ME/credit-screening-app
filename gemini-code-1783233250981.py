@@ -130,7 +130,7 @@ def search_edinet_api(company_name):
     return edinet_result
 
 # ==========================================
-# 【提案D】 有価証券報告書の自動読み込みとテキスト抽出 (キーワード抽出型スマートRAG)
+# 【提案D】 有価証券報告書の自動読み込みとテキスト抽出 (スマートRAG v2: ページ先読み型)
 # ==========================================
 def extract_text_from_edinet_pdf(pdf_url):
     try:
@@ -141,26 +141,34 @@ def extract_text_from_edinet_pdf(pdf_url):
             
             relevant_text = ""
             fallback_text = ""
-            # 【重要】AIに渡す前に、Python側で探す絶対に見落とせないキーワード
-            risk_keywords = ["事業等のリスク", "訴訟", "継続企業", "疑義", "ゴーイング", "不確実性"]
+            risk_keywords = ["事業等のリスク", "訴訟", "継続企業", "疑義", "ゴーイングコンサーン", "不確実性"]
             
-            num_pages = min(150, doc.page_count) # 150ページまで探索
+            num_pages = min(150, doc.page_count)
+            extracted_pages = set() # 重複を防ぐためのセット（箱）
+            
             for i in range(num_pages):
                 page_text = doc.load_page(i).get_text()
                 
-                # 最初の10ページは、キーワードが見つからなかった時の保険として保存
+                # 最初の10ページは保険として保存
                 if i < 10:
-                    fallback_text += page_text + "\n"
+                    fallback_text += f"\n--- {i+1}ページ目 ---\n{page_text}"
                     
-                # ページ内に1つでもキーワードが含まれていれば、そのページを丸ごと抽出
-                if any(keyword in page_text for keyword in risk_keywords):
-                    relevant_text += f"\n--- {i+1}ページ目 ---\n{page_text}"
+                # 【改善1】PDF特有の「空白文字」や「改行」を完全に消し去ってからキーワード照合する
+                clean_text = page_text.replace(" ", "").replace(" ", "").replace("\n", "")
+                
+                if any(keyword in clean_text for keyword in risk_keywords):
+                    # 【改善2】キーワードが見つかったら、そのページと「次の2ページ」もセットで抽出予約する
+                    extracted_pages.update([i, i+1, i+2])
+                    
+            # 予約されたページを順番にテキスト化して結合する
+            for i in sorted(list(extracted_pages)):
+                if i < doc.page_count:
+                    relevant_text += f"\n--- {i+1}ページ目 ---\n{doc.load_page(i).get_text()}"
                     
             doc.close()
-            
-            # リスク関連ページが見つかったらそれを、無ければ保険テキストを返す
             final_text = relevant_text if relevant_text.strip() else fallback_text
-            return final_text[:100000]
+            # AIに渡す情報量を最大20万文字に拡張
+            return final_text[:200000]
             
     except Exception as e:
         return f"PDF読み込みエラー: {str(e)}"
@@ -207,7 +215,7 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     1. 推測は一切禁止。明確な情報とURLが存在する場合のみ「有り」とすること。
     2. 【制裁リストAPI結果】の内容を必ず JSON の sanction_info に反映させること。
     3. ネガティブ情報については、【ネガティブキーワード辞書】に記載された日本語・英語のワードが検索結果内の対象企業の文脈で1つでも使用されている場合、「該当有り」とすること。
-    4. 【有報PDF抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する注記（ゴーイング・コンサーン）」に関する記述を探し出し、50文字程度で要約して edinet_risk_summary に記載すること。該当記述がなければ「特筆すべきリスク記載なし」とすること。
+    4. 【有報PDF抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する重要な疑義（ゴーイング・コンサーン）」に関する具体的な記述を探し出し、要約して edinet_risk_summary に記載すること。該当記述がなければ「特筆すべきリスク記載なし」とすること。文字数の制限はないので、見つけたリスク（赤字の状況や資金繰りの不安など）は詳細かつ具体的に記載すること。
 
     【出力JSONスキーマ】
     {{
