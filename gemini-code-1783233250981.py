@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 # ==========================================
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
+EDINET_API_KEY = st.secrets["EDINET_API_KEY"]
 
 genai.configure(api_key=GEMINI_API_KEY)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
@@ -50,7 +51,13 @@ def search_edinet_api(company_name):
     # 過去100日間を1日ずつ遡ってAPIに問い合わせる
     for i in range(100):
         target_date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-        params = {"date": target_date, "type": 2} # type=2: メタデータのみ取得
+        
+        # ▼ ここを修正：APIキー（Subscription-Key）を通信パラメータに追加します
+        params = {
+            "date": target_date, 
+            "type": 2,
+            "Subscription-Key": EDINET_API_KEY
+        }
         
         try:
             response = requests.get(url, params=params, timeout=5)
