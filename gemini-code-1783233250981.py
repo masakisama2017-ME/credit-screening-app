@@ -4,6 +4,9 @@ import google.generativeai as genai
 from tavily import TavilyClient
 import requests
 from datetime import datetime, timedelta
+import urllib.parse
+import PyPDF2
+import io
 
 # ==========================================
 # 0. APIキーの設定
@@ -11,82 +14,151 @@ from datetime import datetime, timedelta
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 EDINET_API_KEY = st.secrets["EDINET_API_KEY"]
+NTA_API_ID = st.secrets.get("NTA_API_ID", "")
 
 genai.configure(api_key=GEMINI_API_KEY)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+MODEL_NAME = 'gemini-2.5-pro'
 
 # ==========================================
-# 1-A. 情報収集機能 (Web検索)
+# 【提案B】 多言語クエリの自動生成 (Pre-Search AI)
 # ==========================================
-def search_web_info(company_name, country, region):
-    """指定された国・地域と企業名で、Web上からエビデンスを探す"""
-    query = f"国:{country} 地域:{region} 企業名:{company_name} 「公式サイト」 「官報」 「帝国企業コード」 「TSR企業コード」 「DUNSナンバー」 「倒産 OR 訴訟 OR 不祥事 OR 行政処分 OR bankruptcy OR fraud」"
+def generate_localized_query(company_name, country, region):
+    """指定された国の公用語に合わせて、ネガティブ検索クエリを最適化する"""
+    model = genai.GenerativeModel(MODEL_NAME)
+    prompt = f"""
+    対象国「{country}」の最も一般的なビジネス言語（例: 米国なら英語、中国なら中国語、日本なら日本語）を特定し、
+    企業名「{company_name}」に対する以下のネガティブ検索用クエリ（検索窓に入力する文字列）を作成してください。
+    【必須キーワードの意味】倒産, 訴訟, 詐欺, 行政処分, 不祥事
     
+    出力は絶対に、検索クエリの「文字列のみ」としてください（例: "CompanyName" AND ("bankruptcy" OR "lawsuit" OR "fraud") ）。
+    """
+    response = model.generate_content(prompt)
+    localized_query = response.text.strip()
+    
+    final_query = f"{localized_query} 「公式サイト」 「D-U-N-S」 「企業コード」"
+    return final_query
+
+# ==========================================
+# 【提案C】 グローバル制裁リスト照会 (OpenSanctions API)
+# ==========================================
+def check_global_sanctions(company_name):
+    """OpenSanctions APIを利用して、OFAC等の国際的な制裁リストを照会する"""
+    sanction_result = {"status": "クリーン（該当なし）", "details": []}
+    encoded_name = urllib.parse.quote(company_name)
+    url = f"https://api.opensanctions.org/search/default?q={encoded_name}"
+    
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
+            for res in results:
+                if res.get("score", 0) > 0.8:
+                    sanction_result["status"] = "⚠️ 制裁リスト・ウォッチリスト該当の可能性あり"
+                    sanction_result["details"].append({
+                        "name": res.get("caption", ""),
+                        "dataset": ", ".join(res.get("datasets", [])),
+                        "url": res.get("id")
+                    })
+    except Exception as e:
+        sanction_result["status"] = f"照会エラー: {str(e)}"
+        
+    return sanction_result
+
+# ==========================================
+# 1-A. 情報収集機能 (国税庁 法人番号API)
+# ==========================================
+def search_nta_api(company_name, region):
+    nta_result = {"status": "未照会（APIキー未設定）", "corporate_number": "", "official_name": "", "address": ""}
+    if not NTA_API_ID: return nta_result
+
+    encoded_name = urllib.parse.quote(company_name)
+    url = f"https://api.houjin-bangou.nta.go.jp/4/name?id={NTA_API_ID}&name={encoded_name}&type=12&mode=2&history=0"
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if "corporation" in data:
+                corps = data["corporation"]
+                for corp in corps:
+                    address = corp.get("prefectureName", "") + corp.get("cityName", "") + corp.get("streetNumber", "")
+                    if region in address or not region:
+                        nta_result.update({"status": "取得成功", "corporate_number": corp.get("corporateNumber", ""), "official_name": corp.get("name", ""), "address": address})
+                        break
+                if nta_result["status"] != "取得成功" and len(corps) > 0:
+                    corp = corps[0]
+                    nta_result.update({"status": "取得成功（地域不一致の可能性あり）", "corporate_number": corp.get("corporateNumber", ""), "official_name": corp.get("name", ""), "address": corp.get("prefectureName", "") + corp.get("cityName", "")})
+        else:
+            nta_result["status"] = f"取得失敗（エラーコード: {response.status_code}）"
+    except Exception as e:
+        nta_result["status"] = f"通信エラー: {str(e)}"
+    return nta_result
+
+# ==========================================
+# 1-B. 情報収集機能 (Web検索 - 多言語対応版)
+# ==========================================
+def search_web_info(localized_query):
     response = tavily_client.search(
-        query=query,
+        query=localized_query,
         search_depth="advanced", 
         max_results=15
     )
     return response
 
 # ==========================================
-# 1-B. 情報収集機能 (EDINET API連携: 過去100日分【すべて】検索)
+# 1-C. 情報収集機能 (EDINET API連携 過去100日分)
 # ==========================================
 def search_edinet_api(company_name):
-    """金融庁 EDINET API (v2) にアクセスし、直近100日以内の全書類を取得する"""
     url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
-    
-    edinet_result = {
-        "company_found_in_api": False,
-        "documents": [],  # 複数の書類を格納するための空のリスト（箱）
-        "message": "直近100日以内に提出された書類は見つかりませんでした。"
-    }
+    edinet_result = {"company_found_in_api": False, "documents": [], "message": "直近100日以内に提出された書類は見つかりませんでした。"}
 
-    # 過去100日間を1日ずつ遡ってAPIに問い合わせる
     for i in range(100):
         target_date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-        params = {
-            "date": target_date, 
-            "type": 2,
-            "Subscription-Key": EDINET_API_KEY
-        }
-        
+        params = {"date": target_date, "type": 2, "Subscription-Key": EDINET_API_KEY}
         try:
             response = requests.get(url, params=params, timeout=5)
             if response.status_code == 200:
                 data = response.json()
-                
-                # その日に提出された全書類の中から、対象企業を探す
                 for doc in data.get("results", []):
                     filer_name = doc.get("filerName", "")
-                    
-                    # 会社名が一致した場合、リストに書類情報を追加していく（途中で終了しない）
                     if filer_name and company_name in filer_name:
                         doc_id = doc.get("docID")
                         edinet_result["company_found_in_api"] = True
-                        
-                        # 見つけた書類を一つずつリストに追加
                         edinet_result["documents"].append({
                             "title": doc.get("docDescription", "書類名不明"),
                             "filing_date": target_date,
                             "direct_pdf_url": f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}?type=2&Subscription-Key={EDINET_API_KEY}"
                         })
-                        
-        except Exception as e:
-            continue # エラーが起きても次の日の検索へ進む
-            
-    if edinet_result["company_found_in_api"]:
-        edinet_result["message"] = f"合計 {len(edinet_result['documents'])} 件の書類を発見しました。"
-        
+        except Exception:
+            continue
     return edinet_result
 
 # ==========================================
-# 2. AIモデル (Gemini 2.5による厳格な有無判定)
+# 【提案D】 有価証券報告書の自動読み込みとテキスト抽出 (RAG)
 # ==========================================
-def analyze_with_gemini(company_name, country, region, search_results, edinet_results):
-    """検索結果とEDINET API結果をGeminiに渡し、辞書に基づく厳密なJSON出力をさせる"""
-    model = genai.GenerativeModel('gemini-2.5-flash')
+def extract_text_from_edinet_pdf(pdf_url):
+    try:
+        response = requests.get(pdf_url, stream=True, timeout=15)
+        if response.status_code == 200:
+            pdf_file = io.BytesIO(response.content)
+            reader = PyPDF2.PdfReader(pdf_file)
+            extracted_text = ""
+            num_pages = min(30, len(reader.pages))
+            for i in range(num_pages):
+                extracted_text += reader.pages[i].extract_text() + "\n"
+            return extracted_text[:100000]
+    except Exception as e:
+        return f"PDF読み込みエラー: {str(e)}"
+    return ""
+
+# ==========================================
+# 2. AIモデル (Gemini 2.5による全統合・厳格判定)
+# ==========================================
+def analyze_with_gemini(company_name, country, region, search_results, edinet_results, nta_results, sanction_results, pdf_text):
+    model = genai.GenerativeModel(MODEL_NAME)
     
+    # 【完全復元】お客様指定の日本語100個・英語100個のネガティブキーワード全量辞書
     negative_dictionary = """
     【日本語キーワード】
     「倒産・経営破綻」: 倒産, 破産, 民事再生, 会社更生, 特別清算, 経営破綻, 経営難, 事業停止, 廃業, 夜逃げ
@@ -105,155 +177,155 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     「Financial & Payment Issues」: default, arrears, unpaid, late payment, non-payment, debt crisis, illiquidity, cash flow issue, bad debt, write-off
     「Litigation & Legal Actions」: lawsuit, litigation, sued, plaintiff, defendant, court case, damages, injunction, legal action, settlement
     「Crime & Fraud」: scandal, fraud, embezzlement, bribery, corruption, tax evasion, accounting fraud, cover-up, falsification, forgery
-    「Regulatory & Administrative」: sanction, penalty, fine, suspension, revoked, warning letter, inspection, antitrust, regulatory action, debarred
-    「Labor & Employment」: strike, labor dispute, harassment, discrimination, wrongful termination, toxic workplace, walkout, wage theft, whistleblower, union busting
-    「Product & Cyber Issues」: recall, data breach, cyberattack, defect, fatality, malfunction, outage, privacy violation, safety violation, product failure
-    「Compliance & Sanctions」: money laundering, OFAC, cartel, price fixing, insider trading, banned, blocked, embargo, KYC violation, compliance failure
-    「Management Turmoil」: resignation, ousted, boardroom battle, auditor resignation, delisted, going concern, corporate governance, proxy fight, hostile takeover, shareholder revolt
-    「Reputation & Controversy」: arrest, investigation, raided, subpoena, indicted, guilty, boycott, controversy, backlash, outrage
-
+    "Regulatory & Administrative": sanction, penalty, fine, suspension, revoked, warning letter, inspection, antitrust, regulatory action, debarred
+    "Labor & Employment": strike, labor dispute, harassment, discrimination, wrongful termination, toxic workplace, walkout, wage theft, whistleblower, union busting
+    "Product & Cyber Issues": recall, data breach, cyberattack, defect, fatality, malfunction, outage, privacy violation, safety violation, product failure
+    "Compliance & Sanctions": money laundering, OFAC, cartel, price fixing, insider trading, banned, blocked, embargo, KYC violation, compliance failure
+    "Management Turmoil": resignation, ousted, boardroom battle, auditor resignation, delisted, going concern, corporate governance, proxy fight, hostile takeover, shareholder revolt
+    "Reputation & Controversy": arrest, investigation, raided, subpoena, indicted, guilty, boycott, controversy, backlash, outrage
     """
 
     prompt = f"""
     あなたは極めて厳格な与信審査マネージャーです。
-    以下の【Web検索結果】および【EDINET API結果】から、対象企業（所在: {country} {region}、企業名: {company_name}）に関する指定された7項目の有無を判定し、JSON形式で出力してください。
+    以下の【国税庁API】【Web検索】【EDINET API】【制裁リストAPI】および【有報PDF抽出テキスト】から、
+    対象企業（所在: {country} {region}、企業名: {company_name}）の与信情報をJSONで出力してください。
     
-    【厳守する絶対ルール】
-    1. 推測や想像での補完は一切禁止。検索結果内に明確な情報と「リンク(URL)」が存在する場合のみ「有り」とし、確認できない場合は必ず「なし」とすること。
-    2. 同名他社の情報は絶対に除外すること。
-    3. 「有価証券報告書」については、【EDINET API結果】に対象企業の書類が複数含まれている場合、そのすべての書類（提出日、書類名、URL）を reports 配列に抽出すること。
-    4. ネガティブ情報については、【ネガティブキーワード辞書】に記載されたワードが検索結果内の対象企業の文脈で1つでも使用されている場合、「該当有り」とすること。
-    5. 以下のJSONスキーマに完全に従って出力すること。純粋なJSON文字列のみを出力し、マークダウンを含めないこと。
+    【厳守ルール】
+    1. 推測は一切禁止。明確な情報とURLが存在する場合のみ「有り」とすること。
+    2. 【制裁リストAPI結果】の内容を必ず JSON の sanction_info に反映させること。
+    3. ネガティブ情報については、【ネガティブキーワード辞書】に記載された日本語・英語のワードが検索結果内の対象企業の文脈で1つでも使用されている場合、「該当有り」とすること。
+    4. 【有報PDF抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する注記（ゴーイング・コンサーン）」に関する記述を探し出し、50文字程度で要約して edinet_risk_summary に記載すること。該当記述がなければ「特筆すべきリスク記載なし」とすること。
 
     【出力JSONスキーマ】
     {{
-      "official_website": {{ "status": "有り" または "なし", "url": "有りの場合はURL、なしは空文字" }},
-      "securities_report": {{
-        "status": "有り" または "なし",
-        "reports": [
-          {{ "date": "提出日", "title": "書類名", "url": "PDFのURL" }}
-        ]
-      }},
-      "official_gazette": {{ "status": "有り" または "なし", "url": "有りの場合はURL、なしは空文字" }},
-      "tdb_code": {{ "status": "有り" または "なし", "url": "有りの場合はURL、なしは空文字" }},
-      "tsr_code": {{ "status": "有り" または "なし", "url": "有りの場合はURL、なしは空文字" }},
-      "duns_number": {{ "status": "有り" または "なし", "url": "有りの場合はURL、なしは空文字" }},
-      "negative_info": {{
-        "status": "該当有り" または "なし",
-        "details": [
-          {{ "category": "分類名", "matched_keywords": ["ワード1"], "urls": ["URL1"] }}
-        ]
-      }}
+      "corporate_info": {{ "corporate_number": "番号", "official_name": "名称", "address": "所在地", "api_status": "ステータス" }},
+      "sanction_info": {{ "status": "クリーン 等", "details": ["制裁詳細の配列"] }},
+      "official_website": {{ "status": "有り/なし", "url": "URL" }},
+      "securities_report": {{ "status": "有り/なし", "reports": [{{ "date": "提出日", "title": "書類名", "url": "URL" }}] }},
+      "edinet_risk_summary": "有報から抽出したリスクの要約（AI生成）",
+      "official_gazette": {{ "status": "有り/なし", "url": "URL" }},
+      "tdb_code": {{ "status": "有り/なし", "url": "URL" }},
+      "tsr_code": {{ "status": "有り/なし", "url": "URL" }},
+      "duns_number": {{ "status": "有り/なし", "url": "URL" }},
+      "negative_info": {{ "status": "該当有り/なし", "details": [{{ "category": "分類", "matched_keywords": ["ワード"], "urls": ["URL"] }}] }}
     }}
 
+    【ネガティブキーワード辞書】
+    {negative_dictionary}
+
+    【制裁リストAPI結果】
+    {json.dumps(sanction_results, ensure_ascii=False)}
+
+    【国税庁API結果】
+    {json.dumps(nta_results, ensure_ascii=False)}
+
     【EDINET API結果】
-    {json.dumps(edinet_results, ensure_ascii=False, indent=2)}
+    {json.dumps(edinet_results, ensure_ascii=False)}
+
+    【有報PDF抽出テキスト（最大30ページ分）】
+    {pdf_text}
 
     【Web検索結果】
-    {json.dumps(search_results, ensure_ascii=False, indent=2)}
+    {json.dumps(search_results, ensure_ascii=False)}
     """
 
     response = model.generate_content(
         prompt,
         generation_config={"response_mime_type": "application/json"}
     )
-    
     return json.loads(response.text)
 
 # ==========================================
 # 3. UIとオーケストレーター (画面表示)
 # ==========================================
-st.set_page_config(page_title="ファクトベース与信スクリーニング", layout="centered")
-st.title("🛡️ 与信スクリーニング (事実確認ビュー)")
+st.set_page_config(page_title="グローバル与信リスク・インテリジェンス", layout="centered")
+st.title("🛡️ グローバル与信リスク・インテリジェンス")
+st.caption("AI多言語検索 × 制裁リスト照合 × 有報自動解析 (RAG)")
 
 with st.sidebar:
     st.header("調査対象企業の入力")
-    input_country = st.text_input("国", value="日本", placeholder="例: 日本")
-    input_region = st.text_input("地域（都道府県）", placeholder="例: 東京都")
+    input_country = st.text_input("国", value="日本", placeholder="例: 日本, 米国, 中国")
+    input_region = st.text_input("地域（都道府県・州）", placeholder="例: 東京都, カリフォルニア")
     input_name = st.text_input("会社名", placeholder="例: 株式会社〇〇")
-    
-    submit_button = st.button("検索を実行", type="primary")
+    submit_button = st.button("AIディープスクリーニングを実行", type="primary")
 
-if submit_button:
-    if not input_name:
-        st.error("会社名を入力してください。")
-    else:
-        # APIが100日分検索するため、メッセージでユーザーに待ち時間を伝えます
-        with st.spinner(f"「{input_name}」に関する事実情報を検索中...（EDINET過去100日分を照会中のため最大1分程度かかります）"):
-            try:
-                search_data = search_web_info(input_name, input_country, input_region)
-                edinet_data = search_edinet_api(input_name)
-                report_data = analyze_with_gemini(input_name, input_country, input_region, search_data, edinet_data)
-                
-                st.success("スクリーニングが完了しました。")
-                
-                st.markdown("---")
-                
-                # 1. 公式サイト
-                st.subheader("＜公式サイト＞")
-                if report_data.get("official_website", {}).get("status") == "有り":
-                    st.markdown(f"**有り** 🔗 [{report_data['official_website']['url']}]({report_data['official_website']['url']})")
-                else:
-                    st.write("なし")
-                
-                # 2. 有価証券報告書 (複数表示対応)
-                st.subheader("＜有価証券報告書＞")
-                sr_info = report_data.get("securities_report", {})
-                if sr_info.get("status") == "有り" and sr_info.get("reports"):
-                    st.markdown("**有り**")
-                    for rep in sr_info.get("reports", []):
-                        st.markdown(f"- 🔗 [{rep.get('date')} 提出 : {rep.get('title')}]({rep.get('url')})")
-                else:
-                    st.write("なし")
+if submit_button and input_name:
+    with st.spinner("STEP 1: 多言語検索クエリの生成とグローバル制裁リストを照会中..."):
+        localized_query = generate_localized_query(input_name, input_country, input_region)
+        sanction_data = check_global_sanctions(input_name)
+        
+    with st.spinner(f"STEP 2: 現地言語でのWeb検索と国税庁APIの照会中... \n(検索クエリ: {localized_query})"):
+        nta_data = search_nta_api(input_name, input_region)
+        search_data = search_web_info(localized_query)
+        
+    with st.spinner("STEP 3: EDINET API過去100日分の照会と、有報PDFの自動読み込み(RAG)を実行中..."):
+        edinet_data = search_edinet_api(input_name)
+        pdf_extracted_text = ""
+        if edinet_data["company_found_in_api"] and len(edinet_data["documents"]) > 0:
+            first_pdf_url = edinet_data["documents"][0]["direct_pdf_url"]
+            pdf_extracted_text = extract_text_from_edinet_pdf(first_pdf_url)
 
-                # 3. 官報検索結果
-                st.subheader("＜官報検索結果＞")
-                if report_data.get("official_gazette", {}).get("status") == "有り":
-                    st.markdown(f"**有り** 🔗 [{report_data['official_gazette']['url']}]({report_data['official_gazette']['url']})")
+    with st.spinner("STEP 4: Gemini 2.5 による全データの統合分析・リスク判定中..."):
+        try:
+            report_data = analyze_with_gemini(input_name, input_country, input_region, search_data, edinet_data, nta_data, sanction_data, pdf_extracted_text)
+            st.success("ディープスクリーニングが完了しました。")
+            st.markdown("---")
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.subheader("＜法人基本情報＞")
+                corp_info = report_data.get("corporate_info", {})
+                if corp_info.get("corporate_number"):
+                    st.write(f"**法人番号:** `{corp_info.get('corporate_number')}`")
+                    st.write(f"**正式名称:** {corp_info.get('official_name')}")
+                    st.write(f"**所在地:** {corp_info.get('address')}")
                 else:
-                    st.write("なし")
+                    st.write("※取得できませんでした。")
 
-                # 4. 帝国企業コード
-                st.subheader("＜帝国企業コード＞")
-                if report_data.get("tdb_code", {}).get("status") == "有り":
-                    st.markdown(f"**有り** 🔗 [{report_data['tdb_code']['url']}]({report_data['tdb_code']['url']})")
+                st.subheader("＜企業コード＞")
+                st.write(f"**帝国DB:** {report_data.get('tdb_code', {}).get('status')}")
+                st.write(f"**TSR:** {report_data.get('tsr_code', {}).get('status')}")
+                st.write(f"**D-U-N-S:** {report_data.get('duns_number', {}).get('status')}")
+
+                st.subheader("＜公式サイト / 官報＞")
+                st.write(f"**公式サイト:** {report_data.get('official_website', {}).get('status')}")
+                st.write(f"**官報:** {report_data.get('official_gazette', {}).get('status')}")
+
+            with col2:
+                st.subheader("🌍 ＜グローバル制裁・ウォッチリスト＞")
+                sanc_info = report_data.get("sanction_info", {})
+                if "該当の可能性あり" in sanc_info.get("status", ""):
+                    st.error(f"**{sanc_info.get('status')}**")
+                    for s_detail in sanc_info.get("details", []):
+                        st.markdown(f"- {s_detail.get('name')} (リスト: {s_detail.get('dataset')})")
                 else:
-                    st.write("なし")
+                    st.info(sanc_info.get("status", "クリーン"))
 
-                # 5. TSR企業コード
-                st.subheader("＜TSR企業コード＞")
-                if report_data.get("tsr_code", {}).get("status") == "有り":
-                    st.markdown(f"**有り** 🔗 [{report_data['tsr_code']['url']}]({report_data['tsr_code']['url']})")
-                else:
-                    st.write("なし")
-
-                # 6. D-U-N-S Number
-                st.subheader("＜D-U-N-S® Number＞")
-                if report_data.get("duns_number", {}).get("status") == "有り":
-                    st.markdown(f"**有り** 🔗 [{report_data['duns_number']['url']}]({report_data['duns_number']['url']})")
-                else:
-                    st.write("なし")
-
-                # 7. ネガティブ情報
-                st.subheader("＜ネガティブ情報＞")
+                st.subheader("🚨 ＜ネガティブ情報＞")
                 neg_info = report_data.get("negative_info", {})
                 if neg_info.get("status") == "該当有り":
                     st.error("⚠️ **該当有り**")
-                    details = neg_info.get("details", [])
-                    if not details:
-                        st.write("※詳細は取得できませんでした。")
-                    
-                    for detail in details:
+                    for detail in neg_info.get("details", []):
                         with st.expander(f"分類: {detail.get('category', '不明')}", expanded=True):
-                            keywords = ", ".join(detail.get('matched_keywords', []))
-                            st.markdown(f"**該当ワード:** {keywords}")
+                            st.markdown(f"**ワード:** {', '.join(detail.get('matched_keywords', []))}")
                             st.markdown("**確認元URL:**")
                             for url in detail.get("urls", []):
                                 st.markdown(f"- 🔗 [{url}]({url})")
                 else:
                     st.write("なし")
-                    
-                st.markdown("---")
-                            
-            except Exception as e:
-                st.error(f"処理中にエラーが発生しました: {e}")
+
+            st.markdown("---")
+            
+            st.subheader("📄 ＜有価証券報告書 ＆ AI自動解析＞")
+            sr_info = report_data.get("securities_report", {})
+            if sr_info.get("status") == "有り" and sr_info.get("reports"):
+                for rep in sr_info.get("reports", []):
+                    st.markdown(f"- 🔗 [{rep.get('date')} 提出 : {rep.get('title')}]({rep.get('url')})")
+                st.info("💡 **AIによる有報リスク要約 (RAG)**")
+                st.write(report_data.get("edinet_risk_summary", "解析できませんでした。"))
+            else:
+                st.write("過去100日以内の提出なし")
+
+        except Exception as e:
+            st.error(f"処理中にエラーが発生しました: {e}")
