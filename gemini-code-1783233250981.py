@@ -30,39 +30,58 @@ def search_web_info(company_name, country, region):
     return response
 
 # ==========================================
-# 1-B. 情報収集機能 (EDINET API連携)
+# 1-B. 情報収集機能 (EDINET API連携: 過去100日分検索)
 # ==========================================
 def search_edinet_api(company_name):
-    """金融庁 EDINET API (v2) にアクセスし、有価証券報告書の有無を確認する"""
+    """
+    金融庁 EDINET API (v2) にアクセスし、直近の有価証券報告書・四半期報告書の有無を確認する。
+    ※四半期報告書の提出サイクルをカバーするため、過去100日間をループして探します。
+    """
     url = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    params = {"date": yesterday, "type": 2} 
     
     edinet_result = {
-        "api_accessed_date": yesterday,
-        "company_found_in_recent_api": False,
-        "edinet_search_url": f"https://disclosure2.edinet-fsa.go.jp/weee0010.aspx"
+        "company_found_in_api": False,
+        "document_title": "",
+        "filing_date": "",
+        "direct_pdf_url": "",
+        "message": "直近100日以内に提出された書類は見つかりませんでした。"
     }
 
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if "results" in data:
-                for doc in data["results"]:
+    # 過去100日間を1日ずつ遡ってAPIに問い合わせる
+    for i in range(100):
+        target_date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+        params = {"date": target_date, "type": 2} # type=2: メタデータのみ取得
+        
+        try:
+            response = requests.get(url, params=params, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                
+                # その日に提出された全書類の中から、対象企業を探す
+                for doc in data.get("results", []):
                     filer_name = doc.get("filerName", "")
+                    
+                    # 会社名が一致するか確認
                     if filer_name and company_name in filer_name:
                         doc_id = doc.get("docID")
-                        edinet_result["company_found_in_recent_api"] = True
-                        edinet_result["direct_document_api_url"] = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}?type=1"
-                        break
-    except Exception as e:
-        edinet_result["api_error"] = str(e)
-
+                        
+                        # 見つかった場合、結果を格納して即座に終了する
+                        edinet_result["company_found_in_api"] = True
+                        edinet_result["document_title"] = doc.get("docDescription", "書類名不明")
+                        edinet_result["filing_date"] = target_date
+                        edinet_result["direct_pdf_url"] = f"https://disclosure.edinet-fsa.go.jp/api/v2/documents/{doc_id}?type=2"
+                        edinet_result["message"] = f"{target_date} 提出の書類を発見しました。"
+                        
+                        return edinet_result 
+                        
+        except Exception as e:
+            # 通信エラーが起きてもプログラムを止めず、次の日の検索へ進む
+            continue 
+            
     return edinet_result
 
 # ==========================================
-# 2. AIモデル (Gemini 1.5による厳格な有無判定)
+# 2. AIモデル (Gemini 2.5による厳格な有無判定)
 # ==========================================
 def analyze_with_gemini(company_name, country, region, search_results, edinet_results):
     """検索結果とEDINET API結果をGeminiに渡し、辞書に基づく厳密なJSON出力をさせる"""
