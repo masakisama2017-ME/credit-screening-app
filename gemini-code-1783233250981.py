@@ -66,7 +66,7 @@ def search_edinet_api(company_name):
 # ==========================================
 def analyze_with_gemini(company_name, country, region, search_results, edinet_results):
     """検索結果とEDINET API結果をGeminiに渡し、辞書に基づく厳密なJSON出力をさせる"""
-    model = genai.GenerativeModel('gemini-1.5-pro-latest')
+    model = genai.GenerativeModel('gemini-1.5-pro')
     
     # ユーザー指定のネガティブキーワード辞書
     negative_dictionary = """
