@@ -131,6 +131,62 @@ def search_edinet_api(company_name):
     return edinet_result
 
 # ==========================================
+# 【海外強化】 米国SEC EDGAR API連携 (10-K 年次報告書検索)
+# ==========================================
+def search_sec_edgar_api(company_name):
+    """米国SECのEDGAR APIにアクセスし、指定された企業の直近の10-K（年次報告書）を特定する"""
+    sec_result = {"company_found_in_sec": False, "document_title": "", "filing_date": "", "url": "", "message": "SECに提出された直近の10-Kは見つかりませんでした。"}
+    
+    # SEC APIを利用するための必須ヘッダー（会社名とメールアドレスの形式が必要）
+    headers = {"User-Agent": "CreditScreeningApp admin@creditscreening.com"}
+    
+    try:
+        # 1. 企業名からSECのCIKコード（企業番号）を特定するためのマスターリストをダウンロード
+        tickers_url = "https://data.sec.gov/files/company_tickers.json"
+        response = requests.get(tickers_url, headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            tickers_data = response.json()
+            cik = None
+            official_name = ""
+            
+            # 部分一致で企業を検索
+            for key, val in tickers_data.items():
+                if company_name.lower() in val["title"].lower():
+                    cik = str(val["cik_str"])
+                    official_name = val["title"]
+                    break
+            
+            if cik:
+                # 2. CIKコードを使って、その企業の直近の提出書類リストを取得
+                cik_padded = cik.zfill(10)
+                submissions_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+                sub_res = requests.get(submissions_url, headers=headers, timeout=5)
+                
+                if sub_res.status_code == 200:
+                    sub_data = sub_res.json()
+                    filings = sub_data.get("filings", {}).get("recent", {})
+                    
+                    # 提出書類の中から「10-K（年次報告書）」を検索
+                    for idx, form in enumerate(filings.get("form", [])):
+                        if form == "10-K":
+                            acc_num = filings["accessionNumber"][idx]
+                            acc_num_no_dash = acc_num.replace("-", "")
+                            doc_name = filings["primaryDocument"][idx]
+                            
+                            sec_result["company_found_in_sec"] = True
+                            sec_result["document_title"] = f"Form 10-K (Annual Report) - {official_name}"
+                            sec_result["filing_date"] = filings["filingDate"][idx]
+                            # SECの公式HTML閲覧URLを生成
+                            sec_result["url"] = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_num_no_dash}/{doc_name}"
+                            sec_result["message"] = f"直近の10-K（年次報告書）を発見しました。"
+                            return sec_result
+    except Exception as e:
+        sec_result["message"] = f"SEC API照会エラー: {str(e)}"
+        
+    return sec_result
+
+# ==========================================
 # 【提案D】 有価証券報告書の自動読み込みとテキスト抽出 (スマートRAG v2: ページ先読み型)
 # ==========================================
 def extract_text_from_edinet_pdf(pdf_url):
@@ -179,7 +235,7 @@ def extract_text_from_edinet_pdf(pdf_url):
 # ==========================================
 # 2. AIモデル (Geminiによる全統合・【文脈解釈型】厳格判定)
 # ==========================================
-def analyze_with_gemini(company_name, country, region, search_results, edinet_results, nta_results, sanction_results, pdf_text):
+def analyze_with_gemini(company_name, country, region, search_results, edinet_results, nta_results, sanction_results, pdf_text, sec_results):
     model = genai.GenerativeModel(MODEL_NAME)
     
     negative_dictionary = """
@@ -238,7 +294,10 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
 
     【制裁リストAPI結果】
     {json.dumps(sanction_results, ensure_ascii=False)}
-
+    
+    【米国SEC EDGAR結果】
+    {json.dumps(sec_results, ensure_ascii=False)}
+    
     【国税庁API結果】
     {json.dumps(nta_results, ensure_ascii=False)}
 
