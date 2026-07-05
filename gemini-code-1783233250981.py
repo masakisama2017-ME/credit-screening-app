@@ -91,16 +91,17 @@ def search_nta_api(company_name, region):
     return nta_result
 
 # ==========================================
-# 1-B. 情報収集機能 (Web検索)
+# 1-B. 情報収集機能 (Web検索: 強化版)
 # ==========================================
 def search_web_info(localized_query):
+    # include_raw_content=True を追加し、検索結果の「本文」を丸ごと取得してAIに読ませる
     response = tavily_client.search(
         query=localized_query,
         search_depth="advanced", 
-        max_results=15
+        max_results=10, 
+        include_raw_content=True
     )
     return response
-
 # ==========================================
 # 1-C. 情報収集機能 (EDINET API連携 過去100日分)
 # ==========================================
@@ -141,7 +142,8 @@ def extract_text_from_edinet_pdf(pdf_url):
             
             relevant_text = ""
             fallback_text = ""
-            risk_keywords = ["事業等のリスク", "訴訟", "継続企業", "疑義", "ゴーイングコンサーン", "不確実性"]
+            risk_keywords = ["事業等のリスク", "訴訟", "継続企業", "疑義", "ゴーイングコンサーン", "不確実性", 
+                "債務超過", "営業損失", "赤字", "重大な損失", "行政処分", "法令違反", "不正"]
             
             num_pages = min(150, doc.page_count)
             extracted_pages = set() # 重複を防ぐためのセット（箱）
@@ -175,7 +177,7 @@ def extract_text_from_edinet_pdf(pdf_url):
     return ""
 
 # ==========================================
-# 2. AIモデル (Geminiによる全統合・厳格判定)
+# 2. AIモデル (Geminiによる全統合・【文脈解釈型】厳格判定)
 # ==========================================
 def analyze_with_gemini(company_name, country, region, search_results, edinet_results, nta_results, sanction_results, pdf_text):
     model = genai.GenerativeModel(MODEL_NAME)
@@ -183,16 +185,16 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     negative_dictionary = """
     【日本語キーワード】
     「倒産・経営破綻」: 倒産, 破産, 民事再生, 会社更生, 特別清算, 経営破綻, 経営難, 事業停止, 廃業, 夜逃げ
-    「財務・支払不安」: 滞納, 未払い, 支払遅延, 債務不履行, 資金ショート, デフォルト, リスケ, 貸し倒れ, 焦げ付き, 取り立て
-    「訴訟・法的トラブル」: 訴訟, 提訴, 裁判, 敗訴, 損害賠償, 係争中, 法的措置, 差し止め, 仮処分, 刑事告発
-    「犯罪・不祥事」: 不祥事, 詐欺, 横領, 背任, 脱税, 粉飾決算, 隠蔽, 偽装, 改ざん, 贈収賄
-    「行政処分・違反」: 行政処分, 業務停止, 業務改善命令, 立ち入り検査, 指導, 免許取り消し, 排除措置命令, 課徴金, 申告漏れ, 追徴課税
+    「財務・支払不安」: 滞納, 未払い, 支払遅延, 債務不履行, 資金ショート, デフォルト, リスケ, 貸し倒れ, 焦げ付き, 取り立て, 債務超過, 巨額赤字
+    「訴訟・法的トラブル」: 訴訟, 提訴, 裁判, 敗訴, 損害賠償, 係争中, 法的措置, 差し止め, 仮処分, 刑事告発, 法的紛争
+    「犯罪・不祥事」: 不祥事, 詐欺, 横領, 背任, 脱税, 粉飾決算, 隠蔽, 偽装, 改ざん, 贈収賄, 不正会計
+    「行政処分・違反」: 行政処分, 業務停止, 業務改善命令, 立ち入り検査, 指導, 免許取り消し, 排除措置命令, 課徴金, 申告漏れ, 追徴課税, 法令違反
     「労働・雇用問題」: ブラック企業, パワハラ, セクハラ, 不当解雇, 労働争議, ストライキ, 労基署, 未払い残業代, 過労死, 内部告発
-    「品質・サービス問題」: リコール, 情報漏洩, サイバー攻撃, 欠陥, 事故, クレーム, 産地偽装, 異物混入, データ偽造, 炎上
+    「品質・サービス問題」: リコール, 情報漏洩, サイバー攻撃, 欠陥, 事故, クレーム, 産地偽装, 异物混入, データ偽造, 炎上
     「反社・コンプライアンス」: 反社会的勢力, 暴力団, フロント企業, マネーロンダリング, 資金洗浄, 談合, カルテル, インサイダー取引, コンプライアンス違反, 違法
     「経営陣・組織の混乱」: 辞任, 解任, 内紛, 派閥争い, 経営陣刷新, 監査法人交代, 意見不表明, 上場廃止, 監理銘柄, 整理銘柄
     「警察・社会問題」: 疑惑, スキャンダル, 逮捕, 家宅捜索, 送検, 事情聴取, 謝罪, 批判, トラブル, 注意喚起
-
+    
     【英語キーワード】
     「Bankruptcy & Insolvency」: bankruptcy, insolvency, liquidation, Chapter 11, receivership, restructuring, winding up, insolvent, dissolved, defunct
     「Financial & Payment Issues」: default, arrears, unpaid, late payment, non-payment, debt crisis, illiquidity, cash flow issue, bad debt, write-off
@@ -207,15 +209,15 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     """
 
     prompt = f"""
-    あなたは極めて厳格な与信審査マネージャーです。
-    以下の【国税庁API】【Web検索】【EDINET API】【制裁リストAPI】および【有報PDF抽出テキスト】から、
+    あなたは極めて優秀で厳格な与信審査マネージャーです。
+    以下の【国税庁API】【Web検索（本文含む）】【EDINET API】【制裁リストAPI】および【有報PDF抽出テキスト】から、
     対象企業（所在: {country} {region}、企業名: {company_name}）の与信情報をJSONで出力してください。
     
     【厳守ルール】
     1. 推測は一切禁止。明確な情報とURLが存在する場合のみ「有り」とすること。
     2. 【制裁リストAPI結果】の内容を必ず JSON の sanction_info に反映させること。
-    3. ネガティブ情報については、【ネガティブキーワード辞書】に記載された日本語・英語のワードが検索結果内の対象企業の文脈で1つでも使用されている場合、「該当有り」とすること。
-    4. 【有報PDF抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する重要な疑義（ゴーイング・コンサーン）」に関する具体的な記述を探し出し、要約して edinet_risk_summary に記載すること。該当記述がなければ「特筆すべきリスク記載なし」とすること。文字数の制限はないので、見つけたリスク（赤字の状況や資金繰りの不安など）は詳細かつ具体的に記載すること。
+    3. ネガティブ情報については、【ネガティブキーワード辞書】に記載されたワードの「完全一致」だけでなく、「意味合いが同じ関連語や言い換え表現（例：法的紛争、不正行為、赤字転落、債務不履行など）」がWeb検索結果や記事本文に使用されている場合も、文脈を深く読み取り積極的に「該当有り」として抽出すること。企業が隠したがるリスク情報を炙り出すのがあなたの役目です。
+    4. 【有報PDF抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する重要な疑義（ゴーイング・コンサーン）」「重大な赤字や債務超過」に関する具体的な記述を探し出し、要約して edinet_risk_summary に記載すること。該当記述がなければ「特筆すべきリスク記載なし」とすること。文字数の制限はないので、見つけたリスクは詳細かつ具体的に記載すること。
 
     【出力JSONスキーマ】
     {{
@@ -223,12 +225,12 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
       "sanction_info": {{ "status": "クリーン 等", "details": ["制裁詳細の配列"] }},
       "official_website": {{ "status": "有り/なし", "url": "URL" }},
       "securities_report": {{ "status": "有り/なし", "reports": [{{ "date": "提出日", "title": "書類名", "url": "URL" }}] }},
-      "edinet_risk_summary": "有報から抽出したリスクの要約（AI生成）",
+      "edinet_risk_summary": "有報から抽出したリスクの詳細な要約（AI生成）",
       "official_gazette": {{ "status": "有り/なし", "url": "URL" }},
       "tdb_code": {{ "status": "有り/なし", "url": "URL" }},
       "tsr_code": {{ "status": "有り/なし", "url": "URL" }},
       "duns_number": {{ "status": "有り/なし", "url": "URL" }},
-      "negative_info": {{ "status": "該当有り/なし", "details": [{{ "category": "分類", "matched_keywords": ["ワード"], "urls": ["URL"] }}] }}
+      "negative_info": {{ "status": "該当有り/なし", "details": [{{ "category": "分類", "matched_keywords": ["抽出したワードまたは言い換え表現"], "urls": ["URL"] }}] }}
     }}
 
     【ネガティブキーワード辞書】
@@ -246,7 +248,7 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     【有報PDF抽出テキスト（最大200ページ分）】
     {pdf_text}
 
-    【Web検索結果】
+    【Web検索結果（記事本文含む）】
     {json.dumps(search_results, ensure_ascii=False)}
     """
 
