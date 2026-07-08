@@ -208,7 +208,32 @@ def search_global_financial_pdfs(company_name, country):
         return pdf_urls
     except Exception as e:
         return []
+
+# ==========================================
+# 1-F. 【追加】日本の非上場企業向け 財務ディープサーチ機能
+# ==========================================
+def search_unlisted_jp_finance(company_name, region):
+    """EDINETにない非上場企業の決算公告、業績推移、会社概要の生データをWebから深掘り抽出する"""
+    # 非上場企業が財務情報を出しやすいキーワードを狙い撃ち
+    query = f"{company_name} {region} (決算公告 OR 貸借対照表 OR 損益計算書 OR 業績推移 OR 売上高) 会社概要 -site:edinet-fsa.go.jp"
+    try:
+        response = tavily_client.search(
+            query=query,
+            search_depth="advanced", # 検索時間をかけても深く探す
+            max_results=3,           # 上位3サイト（公式サイトや官報ブログなど）を厳選
+            include_raw_content=True # URLだけでなくHTMLの本文テキストを丸ごとぶっこ抜く
+        )
         
+        extracted_text = ""
+        for res in response.get('results', []):
+            content = res.get('raw_content', res.get('content', ''))
+            if content:
+                # 本文が長すぎる場合は15000文字でカットして結合
+                extracted_text += f"\n\n--- 【非上場Webデータ抽出: {res['url']}】 ---\n{content[:15000]}"
+        return extracted_text
+    except Exception as e:
+        return ""
+
 # ==========================================
 # 【提案D】 有価証券報告書等の自動読み込みとテキスト抽出 (欧州ファイアウォール突破型)
 # ==========================================
@@ -305,7 +330,7 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     1. 推測は一切禁止。明確な情報とURLが存在する場合のみ「有り」とすること。
     2. 【制裁リストAPI結果】の内容を必ず JSON の sanction_info に反映させること。
     3. ネガティブ情報については、【ネガティブキーワード辞書】に記載された日本語・英語のワードが検索結果内の対象企業の文脈で1つでも使用されている場合、「該当有り」とすること。
-    4. 【公式開示書類・外部IR資料抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する重要な疑義」「重大な赤字や債務超過」に関する具体的な記述を探し出し、要約して edinet_risk_summary に記載すること。該当記述がなければ「特筆すべきリスク記載なし」とすること。文字数の制限はないので、複数の書類の情報を見つけた場合は詳細かつ具体的に記載すること。
+    5. 【公式開示書類・非上場Webデータ・外部IR資料抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する重要な疑義」「重大な赤字や債務超過」に関する記述を探すこと。また非上場企業の場合は「決算公告の数値（純利益や剰余金）」「売上高の推移」「資本金」などの断片的な財務データがあればそれも拾い上げること。これらを要約して edinet_risk_summary に詳細に記載すること。該当記述がなければ「特筆すべきリスク・財務記載なし」とすること。文字数の制限はないので、複数の書類の情報を見つけた場合は詳細かつ具体的に記載すること。
 
     【出力JSONスキーマ】
     {{
@@ -372,13 +397,13 @@ if submit_button and input_name:
         nta_data = search_nta_api(input_name, input_region)
         search_data = search_web_info(localized_query)
         
-    with st.spinner("STEP 3: 公式開示API（EDINET/SEC）およびグローバルWebからの財務PDF探索を実行中..."):
+    with st.spinner("STEP 3: 公式開示API（EDINET/SEC）および非上場Webからの財務データ探索を実行中..."):
         edinet_data = search_edinet_api(input_name)
         sec_data = search_sec_edgar_api(input_name)
         
         pdf_extracted_text = ""
         
-        # 1. 日本企業向け処理（EDINETからPDFを抽出）
+        # 1. 日本の上場企業向け処理（EDINETからPDFを抽出）
         if edinet_data["company_found_in_api"] and len(edinet_data["documents"]) > 0:
             for idx, doc in enumerate(edinet_data["documents"]):
                 if idx >= 5: break
@@ -390,7 +415,13 @@ if submit_button and input_name:
                 if extracted_text:
                     pdf_extracted_text += f"\n\n======================\n【EDINET書類: {title}】\n======================\n{extracted_text}"
         
-        # 2. 【追加】海外企業向け処理（EDINETで見つからなかった場合、WebからPDFリンクを探して解析）
+        # 2. 【追加】日本の非上場企業向け処理（EDINETに見当たらない場合）
+        elif input_country in ["日本", "Japan"] and not edinet_data["company_found_in_api"]:
+            unlisted_text = search_unlisted_jp_finance(input_name, input_region)
+            if unlisted_text:
+                pdf_extracted_text += f"\n\n======================\n【非上場企業 財務・業績生データ (Web抽出)】\n======================\n{unlisted_text}"
+        
+        # 3. 【追加】海外企業向け処理（EDINETで見つからなかった場合、WebからPDFリンクを探して解析）
         if not edinet_data["company_found_in_api"]:
             global_pdf_urls = search_global_financial_pdfs(input_name, input_country)
             
