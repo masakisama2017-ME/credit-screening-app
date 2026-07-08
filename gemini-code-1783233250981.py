@@ -18,7 +18,7 @@ NTA_API_ID = st.secrets.get("NTA_API_ID", "")
 
 genai.configure(api_key=GEMINI_API_KEY)
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-MODEL_NAME = 'gemini-2.5-pro'
+MODEL_NAME = 'gemini-3.1-pro-preview'
 
 # ==========================================
 # 【提案B】 多言語クエリの自動生成 (Pre-Search AI)
@@ -210,26 +210,46 @@ def search_global_financial_pdfs(company_name, country):
         return []
 
 # ==========================================
-# 1-F. 【追加】日本の非上場企業向け 財務ディープサーチ機能
+# 1-F. 日本の非上場企業・各種特別法人向け 財務ディープサーチ機能
 # ==========================================
 def search_unlisted_jp_finance(company_name, region):
-    """EDINETにない非上場企業の決算公告、業績推移、会社概要の生データをWebから深掘り抽出する"""
-    # 非上場企業が財務情報を出しやすいキーワードを狙い撃ち
-    query = f"{company_name} {region} (決算公告 OR 貸借対照表 OR 損益計算書 OR 業績推移 OR 売上高) 会社概要 -site:edinet-fsa.go.jp"
+    """非上場企業、および各種法人（NPO、学校法人、財団、独法など）特有の財務・事業データをWebから深掘り抽出する"""
+    
+    # 法人格に応じた特有の財務開示キーワードを動的に切り替える
+    special_keywords = ""
+    name_lower = company_name.lower()
+    
+    if "npo" in name_lower or "特定非営利活動" in company_name:
+        # NPO法人は内閣府NPOポータルや独自の活動計算書を狙う
+        special_keywords = "(事業報告書 OR 活動計算書 OR 財産目録 OR 計算書類 OR 内閣府NPOホームページ)"
+    elif "学校法人" in company_name:
+        # 学校法人は私学法に基づく財務公開（資金収支計算書など）を狙う
+        special_keywords = "(財務情報の公開 OR 資金収支計算書 OR 事業活動収支計算書 OR 財務諸表)"
+    elif "財団" in company_name or "社団" in company_name:
+        # 財団・社団は官報決算公告や正味財産増減計算書を狙う
+        special_keywords = "(決算公告 OR 正味財産増減計算書 OR 貸借対照表 OR 財務報告)"
+    elif "独立行政法人" in company_name or "独法" in company_name:
+        # 独立行政法人は総務省評価や独自の財務諸表・事業報告を狙う
+        special_keywords = "(財務諸表 OR 事業報告書 OR 決算報告書 OR 評価結果)"
+    else:
+        # 通常の非上場株式会社など
+        special_keywords = "(決算公告 OR 貸借対照表 OR 損益計算書 OR 業績推移 OR 売上高)"
+
+    # 生成した特有キーワードを組み込んでディープサーチ
+    query = f"{company_name} {region} {special_keywords} 会社概要 -site:edinet-fsa.go.jp"
     try:
         response = tavily_client.search(
             query=query,
-            search_depth="advanced", # 検索時間をかけても深く探す
-            max_results=3,           # 上位3サイト（公式サイトや官報ブログなど）を厳選
-            include_raw_content=True # URLだけでなくHTMLの本文テキストを丸ごとぶっこ抜く
+            search_depth="advanced", 
+            max_results=10,           # 網羅性を高めるため最大10サイトに拡張
+            include_raw_content=True 
         )
         
         extracted_text = ""
         for res in response.get('results', []):
             content = res.get('raw_content', res.get('content', ''))
             if content:
-                # 本文が長すぎる場合は15000文字でカットして結合
-                extracted_text += f"\n\n--- 【非上場Webデータ抽出: {res['url']}】 ---\n{content[:15000]}"
+                extracted_text += f"\n\n--- 【特別法人Webデータ抽出: {res['url']}】 ---\n{content[:15000]}"
         return extracted_text
     except Exception as e:
         return ""
@@ -329,8 +349,9 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
     【厳守ルール】
     1. 推測は一切禁止。明確な情報とURLが存在する場合のみ「有り」とすること。
     2. 【制裁リストAPI結果】の内容を必ず JSON の sanction_info に反映させること。
-    3. ネガティブ情報については、【ネガティブキーワード辞書】に記載された日本語・英語のワードが検索結果内の対象企業の文脈で1つでも使用されている場合、「該当有り」とすること。
-    5. 【公式開示書類・非上場Webデータ・外部IR資料抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する重要な疑義」「重大な赤字や債務超過」に関する記述を探すこと。また非上場企業の場合は「決算公告の数値（純利益や剰余金）」「売上高の推移」「資本金」などの断片的な財務データがあればそれも拾い上げること。これらを要約して edinet_risk_summary に詳細に記載すること。該当記述がなければ「特筆すべきリスク・財務記載なし」とすること。文字数の制限はないので、複数の書類の情報を見つけた場合は詳細かつ具体的に記載すること。
+    3. 米国企業の場合、【米国SEC EDGAR結果】に書類情報があれば、JSONのsecurities_reportにそのタイトルとURL（Form 10-Kなど）を格納すること。
+    4. ネガティブ情報については、【ネガティブキーワード辞書】に記載された日本語・英語のワードが検索結果内の対象企業の文脈で1つでも使用されている場合、「該当有り」とすること。
+    5. 【公式開示書類・非上場Webデータ・外部IR資料抽出テキスト】が存在する場合、そこから「事業等のリスク」「訴訟」「継続企業の前提に関する重要な疑義」「重大な赤字や債務超過」に関する記述を探すこと。また、非上場企業や各種法人の場合は、「決算公告」「売上高・経常利益の推移」「NPOの活動計算書（経常費用・収支）」「学校法人の資金収支・事業活動収支」「財団の正味財産増減計算書」などの断片的な財務データ・資産状況があればそれも漏らさず拾い上げること。これらを統合し、edinet_risk_summary に詳細かつプロフェッショナルな要約として記載すること。該当記述がなければ「特筆すべきリスク・財務記載なし」とすること。文字数の制限はないので、複数の書類の情報を見つけた場合は詳細かつ具体的に記載すること。
 
     【出力JSONスキーマ】
     {{
@@ -415,11 +436,11 @@ if submit_button and input_name:
                 if extracted_text:
                     pdf_extracted_text += f"\n\n======================\n【EDINET書類: {title}】\n======================\n{extracted_text}"
         
-        # 2. 【追加】日本の非上場企業向け処理（EDINETに見当たらない場合）
+        # 2. 日本の非上場企業・各種特別法人向け処理（EDINETに見当たらない場合）
         elif input_country in ["日本", "Japan"] and not edinet_data["company_found_in_api"]:
             unlisted_text = search_unlisted_jp_finance(input_name, input_region)
             if unlisted_text:
-                pdf_extracted_text += f"\n\n======================\n【非上場企業 財務・業績生データ (Web抽出)】\n======================\n{unlisted_text}"
+                pdf_extracted_text += f"\n\n======================\n【非上場企業・各種法人 財務/事業生データ (Web抽出)】\n======================\n{unlisted_text}"
         
         # 3. 【追加】海外企業向け処理（EDINETで見つからなかった場合、WebからPDFリンクを探して解析）
         if not edinet_data["company_found_in_api"]:
