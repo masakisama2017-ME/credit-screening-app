@@ -235,24 +235,43 @@ def search_unlisted_jp_finance(company_name, region):
         # 通常の非上場株式会社など
         special_keywords = "(決算公告 OR 貸借対照表 OR 損益計算書 OR 業績推移 OR 売上高)"
 
-    # 生成した特有キーワードを組み込んでディープサーチ
-    query = f"{company_name} {region} {special_keywords} 会社概要 -site:edinet-fsa.go.jp"
+    # 【強化ポイント1】従来のHTML生テキスト抽出（会社概要やWEBページの文字を拾う）
+    query_html = f"{company_name} {region} {special_keywords} 会社概要 -site:edinet-fsa.go.jp"
     try:
-        response = tavily_client.search(
-            query=query,
+        res_html = tavily_client.search(
+            query=query_html,
             search_depth="advanced", 
-            max_results=10,           # 網羅性を高めるため最大10サイトに拡張
+            max_results=3,           
             include_raw_content=True 
         )
-        
-        extracted_text = ""
-        for res in response.get('results', []):
+        for res in res_html.get('results', []):
             content = res.get('raw_content', res.get('content', ''))
             if content:
                 extracted_text += f"\n\n--- 【特別法人Webデータ抽出: {res['url']}】 ---\n{content[:15000]}"
-        return extracted_text
-    except Exception as e:
-        return ""
+    except Exception:
+        pass
+
+    # 【強化ポイント2】JRTT等の公式サイトに眠る財務PDFを直接狙い撃ちしてハントする（filetype:pdf）
+    query_pdf = f"{company_name} {region} {special_keywords} filetype:pdf"
+    try:
+        res_pdf = tavily_client.search(
+            query=query_pdf,
+            search_depth="advanced", 
+            max_results=3,           
+            include_raw_content=False 
+        )
+        for res in res_pdf.get('results', []):
+            pdf_url = res['url']
+            # 検索エンジンがPDFと判断した、またはURL内に.pdfが含まれるファイルをダウンロード・解析
+            if '.pdf' in pdf_url.lower() or res.get('type') == 'pdf':
+                # 既存の強力な欧州ファイアウォール突破型PDF抽出エンジン（extract_text_from_edinet_pdf）を再利用
+                pdf_text = extract_text_from_edinet_pdf(pdf_url)
+                if pdf_text and "PDF読み込みエラー" not in pdf_text:
+                    extracted_text += f"\n\n======================\n【特別法人 財務PDF(直接ハント): {pdf_url}】\n======================\n{pdf_text}"
+    except Exception:
+        pass
+
+    return extracted_text
 
 # ==========================================
 # 【提案D】 有価証券報告書等の自動読み込みとテキスト抽出 (欧州ファイアウォール突破型)
