@@ -187,14 +187,14 @@ def search_sec_edgar_api(company_name):
     return sec_result
     
 # ==========================================
-# 1-E. グローバル財務PDF探索機能 (海外企業汎用)
+# 1-E. 【海外強化】グローバル財務PDF探索機能 (海外企業汎用)
 # ==========================================
 def search_global_financial_pdfs(company_name, country):
     """Web検索を通じて海外企業の公式IR資料（Annual Report等のPDF）を直接探し出す"""
-    # 【改善1】自動で現在と昨年の年号を取得し、最新のレポートだけを狙い撃ちする
     current_year = datetime.now().year
     last_year = current_year - 1
     
+    # filetype:pdf を明示的に指定し、最新の年号と統合報告書も探索対象に含める
     query = f"{company_name} {country} (Annual Report OR Financial Report) ({current_year} OR {last_year}) filetype:pdf"
     try:
         response = tavily_client.search(
@@ -203,18 +203,18 @@ def search_global_financial_pdfs(company_name, country):
             max_results=5, 
             include_raw_content=False 
         )
-        # 【改善2】URLに.pdfが含まれていなくても、検索エンジンがPDFと判定したURLをすべて信じてリスト化する
+        # URLの末尾の文字列制限を排除し、検索エンジンがPDFと判断したURLをすべて信頼して取得
         pdf_urls = [res['url'] for res in response.get('results', [])]
         return pdf_urls
     except Exception as e:
         return []
         
 # ==========================================
-# 【提案D】 有価証券報告書等の自動読み込みとテキスト抽出
+# 【提案D】 有価証券報告書等の自動読み込みとテキスト抽出 (欧州ファイアウォール突破型)
 # ==========================================
 def extract_text_from_edinet_pdf(pdf_url):
     try:
-        # 【改善3】欧州企業の極めて厳しいファイアウォールを突破するための完全な偽装ヘッダー
+        # 欧州超巨大企業の強固なBot検知を回避するための完全なブラウザ偽装ヘッダー
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -225,7 +225,7 @@ def extract_text_from_edinet_pdf(pdf_url):
         response = requests.get(pdf_url, headers=headers, stream=True, timeout=15)
         
         if response.status_code == 200:
-            # 【改善4】ダウンロードしたデータが本当にPDFかを確認（HTMLページならスキップしてエラーを防ぐ）
+            # URLに.pdfがなくても、ダウンロードした実体のContent-TypeをチェックしてHTMLなら弾く
             content_type = response.headers.get('Content-Type', '').lower()
             if 'pdf' not in content_type and not pdf_url.lower().endswith('.pdf'):
                 return ""
