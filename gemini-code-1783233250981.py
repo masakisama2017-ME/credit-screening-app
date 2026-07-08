@@ -303,7 +303,7 @@ def extract_text_from_edinet_pdf(pdf_url):
                     
             doc.close()
             final_text = relevant_text if relevant_text.strip() else fallback_text
-            return final_text[:200000]
+            return final_text[:100000]
             
     except Exception as e:
         return f"PDF読み込みエラー: {str(e)}"
@@ -455,7 +455,11 @@ if submit_button and input_name:
 
     with st.spinner("STEP 4: Gemini 2.5 による全データの統合分析・リスク判定中..."):
         try:
-            report_data = analyze_with_gemini(input_name, input_country, input_region, search_data, edinet_data, nta_data, sanction_data, pdf_extracted_text, sec_data)
+            # 【追加】AIのメモリパンク（トークン超過）を防ぐため、全ドキュメントの合算テキストを最大25万文字で強制カット
+            safe_pdf_text = pdf_extracted_text[:250000]
+            
+            # pdf_extracted_text を safe_pdf_text に変更してAIに渡す
+            report_data = analyze_with_gemini(input_name, input_country, input_region, search_data, edinet_data, nta_data, sanction_data, safe_pdf_text, sec_data)
             st.success("ディープスクリーニングが完了しました。")
             st.markdown("---")
             
