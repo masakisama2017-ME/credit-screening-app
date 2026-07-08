@@ -235,6 +235,8 @@ def search_unlisted_jp_finance(company_name, region):
         # 通常の非上場株式会社など
         special_keywords = "(決算公告 OR 貸借対照表 OR 損益計算書 OR 業績推移 OR 売上高)"
 
+    extracted_text = ""
+
     # 【強化ポイント1】従来のHTML生テキスト抽出（会社概要やWEBページの文字を拾う）
     query_html = f"{company_name} {region} {special_keywords} 会社概要 -site:edinet-fsa.go.jp"
     try:
