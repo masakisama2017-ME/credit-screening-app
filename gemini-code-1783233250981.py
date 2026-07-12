@@ -186,7 +186,59 @@ def search_sec_edgar_api(company_name):
         
     return sec_result
     
-Renault
+# ==========================================
+# 1-E. 【欧州公式市場特化版】グローバル財務PDF探索機能（完全網羅・ブルートフォース搭載）
+# ==========================================
+def search_global_financial_pdfs(company_name, country):
+    """Web検索を通じ、海外企業の公式IR資料、特に欧州の「金融監督機関・証券取引所」から公式書類を直接探し出す"""
+    current_year = datetime.now().year
+    last_year = current_year - 1
+    two_years_ago = current_year - 2
+    years_query = f"({current_year} OR {last_year} OR {two_years_ago})"
+    
+    ir_keywords = '("Investor Relations" OR IR OR "Investisseurs" OR "Investitori" OR "Inversores" OR "Investoren") -site:bloomberg.com -site:reuters.com -site:wsj.com -site:ft.com'
+    
+    official_domains = ""
+    country_lower = country.lower()
+    
+    if "イギリス" in country or "英国" in country or "uk" in country_lower or "united kingdom" in country_lower:
+        official_domains = "site:londonstockexchange.com OR site:fca.org.uk OR site:company-information.service.gov.uk"
+    elif "フランス" in country or "france" in country_lower:
+        official_domains = "site:amf-france.org OR site:euronext.com"
+    elif "ドイツ" in country or "germany" in country_lower:
+        official_domains = "site:bundesanzeiger.de OR site:unternehmensregister.de OR site:deutsche-boerse.com OR site:boerse-frankfurt.de"
+    elif "イタリア" in country or "italy" in country_lower:
+        official_domains = "site:consob.it OR site:borsaitaliana.it"
+    elif "オランダ" in country or "netherlands" in country_lower or "dutch" in country_lower:
+        official_domains = "site:afm.nl OR site:euronext.com"
+    
+    eu_keywords = "Annual Report OR Financial Report OR Universal Registration Document OR Consolidated Financial Statements OR Geschäftsbericht OR Rapport annuel OR Relazione Annuale OR Informe Anual OR Jaarverslag"
+    
+    pdf_urls = []
+    
+    try:
+        # STEP A: 公式市場（証券取引所・監督庁）のデータベースに直接アクセス
+        if official_domains:
+            query_official = f"{company_name} ({official_domains}) ({eu_keywords}) {years_query} filetype:pdf"
+            res_official = tavily_client.search(query=query_official, search_depth="advanced", max_results=3, include_raw_content=False)
+            pdf_urls.extend([res['url'] for res in res_official.get('results', [])])
+        
+        # STEP B: IRサイト限定（公式市場にない場合、自社HPのIRページを探す）
+        if not pdf_urls:
+            query_ir = f"{company_name} {ir_keywords} ({eu_keywords}) {years_query} filetype:pdf"
+            res_ir = tavily_client.search(query=query_ir, search_depth="advanced", max_results=5, include_raw_content=False)
+            pdf_urls.extend([res['url'] for res in res_ir.get('results', [])])
+
+        # STEP C: 【追加】最終奥義（ブルートフォース）。カタカナ社名や社名変更（例：ロイヤルダッチシェル→Shell plc）の検索漏れを防ぐため、条件を極限まで削る
+        if not pdf_urls:
+            query_brute = f"{company_name} ({eu_keywords}) {years_query} filetype:pdf"
+            res_brute = tavily_client.search(query_brute, search_depth="advanced", max_results=5, include_raw_content=False)
+            pdf_urls.extend([res['url'] for res in res_brute.get('results', [])])
+            
+        # 検索エンジンが filetype:pdf で探し出したものをすべて信頼し、重複を排除して返す
+        return list(dict.fromkeys(pdf_urls))
+    except Exception as e:
+        return []
 
 # ==========================================
 # 1-F. 日本の非上場企業・各種特別法人向け 財務ディープサーチ機能
