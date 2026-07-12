@@ -187,23 +187,27 @@ def search_sec_edgar_api(company_name):
     return sec_result
     
 # ==========================================
-# 1-E. 【海外強化】グローバル財務PDF探索機能 (海外企業汎用)
+# 1-E. 【欧州強化版】グローバル財務PDF探索機能 (海外企業汎用)
 # ==========================================
 def search_global_financial_pdfs(company_name, country):
-    """Web検索を通じて海外企業の公式IR資料（Annual Report等のPDF）を直接探し出す"""
+    """Web検索を通じて海外企業（特に欧州）の公式IR資料（Annual Report等のPDF）を直接探し出す"""
     current_year = datetime.now().year
     last_year = current_year - 1
     
-    # filetype:pdf を明示的に指定し、最新の年号と統合報告書も探索対象に含める
-    query = f"{company_name} {country} (Annual Report OR Financial Report) ({current_year} OR {last_year}) filetype:pdf"
+    # 【強化ポイント1】欧州主要言語の「年次報告書」キーワードをOR条件で完全網羅
+    eu_keywords = "Annual Report OR Financial Report OR Integrated Report OR Geschäftsbericht OR Rapport annuel OR Relazione Annuale OR Informe Anual OR Jaarverslag"
+    
+    # 年号と多言語キーワードを組み合わせて最強のPDF探索クエリを生成
+    query = f"{company_name} {country} ({eu_keywords}) ({current_year} OR {last_year}) filetype:pdf"
     try:
         response = tavily_client.search(
             query=query,
             search_depth="advanced", 
-            max_results=5, 
+            max_results=8, # 【強化ポイント2】網羅性を高めるため探索範囲を5件から8件に拡大
             include_raw_content=False 
         )
-        # URLの末尾の文字列制限を排除し、検索エンジンがPDFと判断したURLをすべて信頼して取得
+        
+        # 検索エンジンがPDFと判断したURLをすべて信頼して取得
         pdf_urls = [res['url'] for res in response.get('results', [])]
         return pdf_urls
     except Exception as e:
