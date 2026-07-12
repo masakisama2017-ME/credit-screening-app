@@ -255,11 +255,10 @@ def search_unlisted_jp_finance(company_name, region):
     return extracted_text
 
 # ==========================================
-# 【提案D】 有価証券報告書等の自動読み込みとテキスト抽出 (欧州ファイアウォール突破型)
+# 【提案D】 有価証券報告書等の自動読み込みとテキスト抽出 (超大容量・深層ページ対応型)
 # ==========================================
 def extract_text_from_edinet_pdf(pdf_url):
     try:
-        # 欧州超巨大企業の強固なBot検知を回避するための完全なブラウザ偽装ヘッダー
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -267,10 +266,10 @@ def extract_text_from_edinet_pdf(pdf_url):
             "Connection": "keep-alive"
         }
         
-        response = requests.get(pdf_url, headers=headers, stream=True, timeout=15)
+        # 【改善1】数十MBに及ぶ巨大PDFのダウンロードタイムアウトを15秒→30秒に延長
+        response = requests.get(pdf_url, headers=headers, stream=True, timeout=30)
         
         if response.status_code == 200:
-            # URLに.pdfがなくても、ダウンロードした実体のContent-TypeをチェックしてHTMLなら弾く
             content_type = response.headers.get('Content-Type', '').lower()
             if 'pdf' not in content_type and not pdf_url.lower().endswith('.pdf'):
                 return ""
@@ -280,16 +279,17 @@ def extract_text_from_edinet_pdf(pdf_url):
             
             relevant_text = ""
             fallback_text = ""
-            # 【強化3】英語の「財務諸表（損益・貸借・CF）」や「今後の見通し」を示すページも確実に抜き取る
+            # リスクと財務情報の英語キーワード網羅
             risk_keywords = [
                 "事業等のリスク", "訴訟", "継続企業", "疑義", "ゴーイングコンサーン", "不確実性", 
                 "債務超過", "営業損失", "赤字", "重大な損失", "行政処分", "法令違反", "不正",
                 "経営成績", "財政状態", "キャッシュ・フロー", "業績の推移", "重要な会計方針",
                 "net loss", "going concern", "insolvency", "restructuring", "litigation", "risk factors",
-                "income statement", "balance sheet", "cash flow", "financial statements", "consolidated", "outlook" # ←この英語行を追加
+                "income statement", "balance sheet", "cash flow", "financial statements", "consolidated", "outlook"
             ]
             
-            num_pages = min(150, doc.page_count)
+            # 【改善2】欧州企業の分厚いレポートの奥底まで届かせるため、探索範囲を最大400ページへ大幅拡大
+            num_pages = min(400, doc.page_count)
             extracted_pages = set()
             
             for i in range(num_pages):
@@ -306,7 +306,8 @@ def extract_text_from_edinet_pdf(pdf_url):
                     
             doc.close()
             final_text = relevant_text if relevant_text.strip() else fallback_text
-            return final_text[:100000]
+            # AIパンク防止のための6万文字制限（安全弁）は維持
+            return final_text[:60000]
             
     except Exception as e:
         return f"PDF読み込みエラー: {str(e)}"
