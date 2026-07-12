@@ -187,28 +187,57 @@ def search_sec_edgar_api(company_name):
     return sec_result
     
 # ==========================================
-# 1-E. 【欧州強化版】グローバル財務PDF探索機能 (海外企業汎用)
+# 1-E. 【欧州公式市場特化版】グローバル財務PDF探索機能
 # ==========================================
 def search_global_financial_pdfs(company_name, country):
-    """Web検索を通じて海外企業（特に欧州）の公式IR資料（Annual Report等のPDF）を直接探し出す"""
+    """Web検索を通じ、海外企業の公式IR資料、特に欧州の「金融監督機関・証券取引所」から公式書類を直接探し出す"""
     current_year = datetime.now().year
     last_year = current_year - 1
     
-    # 【強化ポイント1】欧州主要言語の「年次報告書」キーワードをOR条件で完全網羅
-    eu_keywords = "Annual Report OR Financial Report OR Integrated Report OR Geschäftsbericht OR Rapport annuel OR Relazione Annuale OR Informe Anual OR Jaarverslag"
+    # 【強化1】入力された国名に応じて、各国の「公式金融市場・監督庁のデータベース」のドメインを特定
+    official_domains = ""
+    country_lower = country.lower()
     
-    # 年号と多言語キーワードを組み合わせて最強のPDF探索クエリを生成
-    query = f"{company_name} {country} ({eu_keywords}) ({current_year} OR {last_year}) filetype:pdf"
+    if "イギリス" in country or "英国" in country or "uk" in country_lower or "united kingdom" in country_lower:
+        official_domains = "site:londonstockexchange.com OR site:fca.org.uk OR site:company-information.service.gov.uk"
+    elif "フランス" in country or "france" in country_lower:
+        official_domains = "site:amf-france.org OR site:euronext.com"
+    elif "ドイツ" in country or "germany" in country_lower:
+        official_domains = "site:bundesanzeiger.de OR site:unternehmensregister.de OR site:deutsche-boerse.com OR site:boerse-frankfurt.de"
+    elif "イタリア" in country or "italy" in country_lower:
+        official_domains = "site:consob.it OR site:borsaitaliana.it"
+    
+    # 公式市場以外の国、あるいは公式市場で見つからなかった場合のための通常のIRサイト検索クエリ
+    ir_keywords = "(Investor Relations OR IR) -site:bloomberg.com -site:reuters.com -site:wsj.com"
+    
+    # 検索範囲の決定（欧州主要国なら公式ドメインを優先）
+    search_scope = f"({official_domains})" if official_domains else ir_keywords
+    eu_keywords = "Annual Report OR Financial Report OR Universal Registration Document OR Consolidated Financial Statements OR Geschäftsbericht OR Rapport annuel OR Relazione Annuale OR Informe Anual OR Jaarverslag"
+    
+    # 検索クエリ生成（公式市場ドメイン内で最新の財務PDFを探す）
+    query = f"{company_name} {search_scope} ({eu_keywords}) ({current_year} OR {last_year}) filetype:pdf"
+    
     try:
+        # STEP A: 公式市場（証券取引所・監督庁）のデータベースに直接アクセス
         response = tavily_client.search(
             query=query,
             search_depth="advanced", 
-            max_results=8, # 【強化ポイント2】網羅性を高めるため探索範囲を5件から8件に拡大
+            max_results=5, 
             include_raw_content=False 
         )
-        
-        # 検索エンジンがPDFと判断したURLをすべて信頼して取得
         pdf_urls = [res['url'] for res in response.get('results', [])]
+        
+        # STEP B: フォールバック処理（もし公式市場にPDFがまだ提出されていなかった場合、企業の自社HPを探しに行く）
+        if not pdf_urls and official_domains:
+            fallback_query = f"{company_name} {ir_keywords} ({eu_keywords}) ({current_year} OR {last_year}) filetype:pdf"
+            fallback_res = tavily_client.search(
+                query=fallback_query,
+                search_depth="advanced", 
+                max_results=5, 
+                include_raw_content=False
+            )
+            pdf_urls = [res['url'] for res in fallback_res.get('results', [])]
+
         return pdf_urls
     except Exception as e:
         return []
