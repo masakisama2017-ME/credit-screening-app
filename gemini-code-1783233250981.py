@@ -449,7 +449,21 @@ def analyze_with_gemini(company_name, country, region, search_results, edinet_re
         prompt,
         generation_config={"response_mime_type": "application/json"}
     )
-    return json.loads(response.text)
+    
+    data = json.loads(response.text)
+    
+    # --- 【追加】AIのJSON構造ブレ（勝手なリスト化）を吸収する防御処理 ---
+    # 1. 全体がリストになってしまった場合
+    if isinstance(data, list):
+        data = data[0] if len(data) > 0 else {}
+        
+    # 2. 各項目がリストになってしまった場合
+    dict_keys = ["corporate_info", "sanction_info", "official_website", "securities_report", "official_gazette", "tdb_code", "tsr_code", "duns_number", "negative_info"]
+    for key in dict_keys:
+        if key in data and isinstance(data[key], list):
+            data[key] = data[key][0] if len(data[key]) > 0 else {}
+            
+    return data
 
 # ==========================================
 # 3. UIとオーケストレーター (画面表示)
